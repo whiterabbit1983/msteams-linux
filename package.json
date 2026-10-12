@@ -1,0 +1,15 @@
+{
+  "name": "msteams-tauri",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Unofficial Microsoft Teams desktop wrapper built with Tauri",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

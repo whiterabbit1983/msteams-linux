@@ -1,0 +1,10 @@
+# Rust / Cargo
+src-tauri/target/
+src-tauri/gen/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Local build sysroot created by scripts/setup-sysroot.sh
+.tauri-sysroot/
