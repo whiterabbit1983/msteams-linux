@@ -112,6 +112,51 @@ fn permission_response(kind: PermissionKind) -> PermissionResponse {
     }
 }
 
+/// Applies the WebKitGTK settings Teams needs, which the Linux WebView does not
+/// enable by default:
+///
+/// * third-party cookies — Teams refuses to load without them and redirects to
+///   its `report-third-party-cookies.html` page; WebKitGTK blocks them (cookie
+///   accept policy `NoThirdParty` with Intelligent Tracking Prevention on).
+/// * media capabilities — the `MediaCapabilities` API used to negotiate codecs.
+/// * WebRTC — requests `RTCPeerConnection` support (`enable-webrtc`). This is
+///   *not* enough on its own: the setting is a no-op unless the system WebKitGTK
+///   was compiled with `ENABLE_WEB_RTC`. Ubuntu's `libwebkit2gtk-4.1-0` is built
+///   without it, so `RTCPeerConnection` stays `undefined` and Teams reports
+///   "You can't receive or make calls right now. Please try again by restarting
+///   the app." The call is kept so the wrapper uses WebRTC on WebKitGTK builds
+///   that do include it.
+#[cfg(target_os = "linux")]
+fn configure_webkit<R: Runtime>(window: &WebviewWindow<R>) {
+    use webkit2gtk::{
+        CookieAcceptPolicy, CookieManagerExt, SettingsExt, WebsiteDataManagerExt, WebViewExt,
+    };
+
+    let _ = window.with_webview(|webview| {
+        let view = webview.inner();
+
+        if let Some(settings) = view.settings() {
+            settings.set_enable_webrtc(true);
+            settings.set_enable_media_capabilities(true);
+
+            // When MSTEAMS_DEBUG is set, mirror the page's console into stdout
+            // and turn on the inspector so the wrapper can be debugged from a
+            // terminal.
+            if std::env::var_os("MSTEAMS_DEBUG").is_some() {
+                settings.set_enable_write_console_messages_to_stdout(true);
+                settings.set_enable_developer_extras(true);
+            }
+        }
+
+        if let Some(manager) = view.website_data_manager() {
+            manager.set_itp_enabled(false);
+            if let Some(cookies) = manager.cookie_manager() {
+                cookies.set_accept_policy(CookieAcceptPolicy::Always);
+            }
+        }
+    });
+}
+
 /// Builds a WebView window that loads `url` and shares the common Teams
 /// behaviours (external link handling, popup handling and permissions).
 fn create_window<R: Runtime>(
@@ -129,7 +174,9 @@ fn create_window<R: Runtime>(
         .title("Microsoft Teams")
         .data_directory(data_dir)
         .min_inner_size(400.0, 300.0)
-        .initialization_script(INJECT_JS)
+        .initialization_script(INJECT_JS);
+
+    let builder = builder
         // Keep Teams/Microsoft navigation in-app, send the rest to the browser.
         .on_navigation(move |url| {
             if is_trusted(url) {
@@ -155,10 +202,17 @@ fn create_window<R: Runtime>(
         })
         .on_permission_request(|_webview, kind| permission_response(kind));
 
-    match kind {
+    let window = match kind {
         WindowKind::Main => builder.inner_size(1280.0, 820.0).center().build(),
         WindowKind::Popup => builder.inner_size(520.0, 720.0).center().build(),
-    }
+    }?;
+
+    // Teams needs third-party cookies and WebRTC; WebKitGTK disables both by
+    // default.
+    #[cfg(target_os = "linux")]
+    configure_webkit(&window);
+
+    Ok(window)
 }
 
 /// JavaScript injected into every Teams window before the page scripts run.

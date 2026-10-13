@@ -20,6 +20,13 @@ tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Used on Linux to reach the underlying WebKitGTK webview and apply the settings
+# Teams requires (third-party cookies, MediaCapabilities and WebRTC). The feature
+# set mirrors the one wry already enables for this crate so both resolve to the
+# same version.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "2", features = ["v2_38"] }
+
 [profile.release]
 panic = "abort"
 codegen-units = 1
