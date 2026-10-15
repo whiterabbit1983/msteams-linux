@@ -2060,6 +2060,8 @@ dependencies = [
 name = "msteams-tauri"
 version = "1.0.0"
 dependencies = [
+ "gio",
+ "glib",
  "serde",
  "serde_json",
  "tauri",

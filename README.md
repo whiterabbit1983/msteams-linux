@@ -27,29 +27,59 @@ hands external links off to your browser — without bundling the official
 - **Tray icon with unread badge** — closing the window hides the app to the
   system tray, whose icon shows a red badge with the unread message count
   (driven by Teams' web notifications and the unread counter it puts in
-  `document.title`).
+  `document.title`). Left-clicking the tray icon restores the window,
+  right-clicking opens the menu.
 - **Persistent session** — the WebView data directory lives under the app data
   directory, so you stay signed in between launches.
-- **Third-party cookies on Linux** — WebKitGTK blocks third-party cookies by
-  default, which makes Teams redirect to its
-  `report-third-party-cookies.html` error page. The wrapper reaches into the
-  WebKitGTK webview and switches the cookie accept policy to *always* and turns
-  Intelligent Tracking Prevention off so Teams loads normally.
+- **Third-party cookies on Linux** — WebKitGTK's default cookie accept policy is
+  *exclusively from the main document's domain*, which drops the cookies Teams
+  uses during sign-in. The wrapper switches the policy to *always* (and turns
+  Intelligent Tracking Prevention off) before the first request leaves, so
+  Teams' third-party-cookie probe succeeds.
 - **Cross-platform** — Linux, macOS and Windows (Tauri v2 runtime).
+
+## Why the "third-party cookies" error page used to appear
+
+Teams checks third-party cookie support at start-up by loading
+`https://teams.public.onecdn.static.microsoft/…/report-third-party-cookies.html`
+in a **hidden iframe** and asking that page to set a `SameSite=None` cookie. If
+the probe fails, Teams immediately navigates to the very same URL — which is the
+error dialog (and the MS link opened in your browser) you saw.
+
+WebKitGTK emits its `decide-policy` signal for **every frame**, and Tauri's
+`on_navigation` is a thin wrapper around it. The wrapper used to treat the probe
+iframe exactly like a user-clicked link: because the OneCDN host was not in
+`TRUSTED_HOSTS` the navigation was rejected *and* handed to the system browser, so
+the probe never ran and Teams concluded the browser was broken.
+
+The fix has three parts:
+
+1. on Linux the navigation policy is installed directly on the WebKitGTK web
+   view (`install_navigation_policy`) instead of going through `on_navigation`,
+   and it only applies to **user-initiated** navigations (link clicks and form
+   submissions). Sub-frames, redirects and script-driven loads — which
+   WebKitGTK does not let us tell apart — are always left alone;
+2. `static.microsoft` (the OneCDN bucket Teams serves itself from) is part of
+   `TRUSTED_HOSTS`, so Teams' own report pages stay inside the app;
+3. the third-party cookie settings are applied *before* the window navigates to
+   Teams, instead of right after a window that was already loading the URL was
+   built.
 
 ## Layout
 
 ```
 .
+├── .github/workflows/release.yml  # CI: checks + AppImage -> GitHub release
 ├── dist/                     # minimal placeholder page (bundled, unused at runtime)
 ├── package.json              # Tauri CLI scripts
+├── package-lock.json         # pinned npm deps (required by CI's `npm ci`)
 ├── scripts/
 │   ├── setup-sysroot.sh      # root-less build deps (fallback, see below)
 │   ├── build.sh              # build/run helper that wires up the sysroot
-│   └── build-appimage.sh     # Linux AppImage packaging (see below)
+│   └── build-appimage.sh     # Linux AppImage packaging for the sysroot setup
 └── src-tauri/
     ├── Cargo.toml
-    ├── build.rs
+    ├── build.rs              # declares the app commands for the Tauri ACL
     ├── tauri.conf.json       # app metadata, bundle + window config
     ├── capabilities/default.json
     ├── icons/                 # generated app icons
@@ -177,17 +207,31 @@ Almost everything lives in `src-tauri/src/lib.rs`:
   Links to anything else are opened externally. Tighten/extend this if your tenant
   uses custom domains.
 - `create_window` — window size, title and the navigation / popup / permission
-  handlers shared by the main window and popups.
+  handlers shared by the main window and popups. The window is built on
+  `about:blank` and navigated to Teams afterwards, so the WebKitGTK settings are
+  in place before the first request.
 - `configure_webkit` (Linux only) — reaches into the WebKitGTK webview via
-  `with_webview` and re-enables third-party cookies (without which Teams shows
-  its third-party-cookie error page), enables `MediaCapabilities` and asks for
-  WebRTC support (see [Calls / WebRTC on Linux](#calls--webrtc-on-linux)).
+  `with_webview`, turns Intelligent Tracking Prevention off and sets the cookie
+  accept policy to *always* (without them Teams shows its third-party-cookie
+  error page), enables `MediaCapabilities` and asks for WebRTC support (see
+  [Calls / WebRTC on Linux](#calls--webrtc-on-linux)). With `MSTEAMS_DEBUG=1`
+  it also prints the resulting ITP and cookie-policy state.
+- `install_navigation_policy` (Linux only) — the "open external links in the
+  browser" rule, implemented on the WebKitGTK webview and restricted to
+  user-initiated navigations (see
+  [Why the "third-party cookies" error page used to appear](#why-the-third-party-cookies-error-page-used-to-appear)).
+- `close_popups` — drops the leftover `auth-*` windows after sign-in.
 - `permission_response` — which permissions are auto-granted.
 - `INJECT_JS` — script injected into the Teams pages: it hooks the web
   `Notification` API, watches `document.title` for the `(N)` unread counter and
   forwards both to the `set_unread_count` / `show_notification` commands.
 - `render_badge` — composites the red unread badge onto the tray icon.
 - The tray, its menu and the hide-to-tray close behaviour are set up in `run()`.
+
+The `set_unread_count` / `show_notification` commands are app commands: they are
+declared in `src-tauri/build.rs` (which generates their `allow-*` permissions)
+and granted by `src-tauri/capabilities/default.json`, together with the
+Microsoft origins the app is allowed to talk to.
 
 App metadata (name, identifier, icons, bundle targets) is in
 `src-tauri/tauri.conf.json`.

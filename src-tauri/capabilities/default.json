@@ -3,5 +3,37 @@
   "identifier": "default",
   "description": "Default capability for the Microsoft Teams webview windows.",
   "windows": ["main", "auth-*"],
-  "permissions": ["core:default", "notification:default"]
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "allow-set-unread-count",
+    "allow-show-notification"
+  ],
+  "remote": {
+    "urls": [
+      "https://teams.microsoft.com/*",
+      "https://*.teams.microsoft.com/*",
+      "https://msteams.microsoft.com/*",
+      "https://*.microsoft.com/*",
+      "https://*.microsoftonline.com/*",
+      "https://*.live.com/*",
+      "https://*.office.com/*",
+      "https://*.office.net/*",
+      "https://*.office365.com/*",
+      "https://*.sharepoint.com/*",
+      "https://*.sharepointonline.com/*",
+      "https://*.cloud.microsoft/*",
+      "https://*.windows.net/*",
+      "https://*.msauth.net/*",
+      "https://*.msftauth.net/*",
+      "https://*.msauthimages.net/*",
+      "https://*.msftauthimages.net/*",
+      "https://*.skype.com/*",
+      "https://*.lync.com/*",
+      "https://*.aka.ms/*",
+      "https://*.azure.com/*",
+      "https://*.azure.net/*",
+      "https://*.trafficmanager.net/*"
+    ]
+  }
 }

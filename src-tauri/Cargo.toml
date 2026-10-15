@@ -26,6 +26,8 @@ serde_json = "1"
 # same version.
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = { version = "2", features = ["v2_38"] }
+gio = "0.18"
+glib = "0.18"
 
 [profile.release]
 panic = "abort"

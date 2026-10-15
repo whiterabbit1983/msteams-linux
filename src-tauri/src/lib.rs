@@ -60,6 +60,10 @@ const TRUSTED_HOSTS: &[&str] = &[
     "azure.com",
     "azure.net",
     "trafficmanager.net",
+    // Teams serves its web client (and the pages it reports problems with, such
+    // as `report-third-party-cookies.html`) from its own OneCDN bucket, which
+    // lives under `static.microsoft`.
+    "static.microsoft",
 ];
 
 /// Counter used to give every popup window a unique label.
@@ -86,15 +90,23 @@ fn is_trusted(url: &Url) -> bool {
     };
 
     let host = host.to_ascii_lowercase();
-    TRUSTED_HOSTS.iter().any(|suffix| {
-        host == *suffix || host.ends_with(&format!(".{suffix}"))
-    })
+    TRUSTED_HOSTS
+        .iter()
+        .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
 }
 
 /// Opens a URL in the user's default browser.
+///
+/// The opener plugin waits for the browser launcher to exit, which can take a
+/// while, so it runs off the UI thread: on Linux this is called from inside a
+/// WebKitGTK policy decision and blocking there would freeze the window.
 fn open_external<R: Runtime>(app: &AppHandle<R>, url: &Url) {
-    use tauri_plugin_opener::OpenerExt;
-    let _ = app.opener().open_url(url.as_str(), None::<&str>);
+    let app = app.clone();
+    let url = url.clone();
+    std::thread::spawn(move || {
+        use tauri_plugin_opener::OpenerExt;
+        let _ = app.opener().open_url(url.as_str(), None::<&str>);
+    });
 }
 
 /// Camera, microphone and notifications must be granted for Teams calls and
@@ -115,9 +127,11 @@ fn permission_response(kind: PermissionKind) -> PermissionResponse {
 /// Applies the WebKitGTK settings Teams needs, which the Linux WebView does not
 /// enable by default:
 ///
-/// * third-party cookies — Teams refuses to load without them and redirects to
-///   its `report-third-party-cookies.html` page; WebKitGTK blocks them (cookie
-///   accept policy `NoThirdParty` with Intelligent Tracking Prevention on).
+/// * third-party cookies — WebKitGTK's default cookie accept policy is
+///   `ExclusivelyFromMainDocumentDomain`, so cookies set by (or for) another
+///   site are dropped. Teams uses third-party cookies during sign-in, and its
+///   third-party-cookie probe (`report-third-party-cookies.html`, loaded in a
+///   hidden iframe) fails without them, which makes Teams show that error page.
 /// * media capabilities — the `MediaCapabilities` API used to negotiate codecs.
 /// * WebRTC — requests `RTCPeerConnection` support (`enable-webrtc`). This is
 ///   *not* enough on its own: the setting is a no-op unless the system WebKitGTK
@@ -129,10 +143,13 @@ fn permission_response(kind: PermissionKind) -> PermissionResponse {
 #[cfg(target_os = "linux")]
 fn configure_webkit<R: Runtime>(window: &WebviewWindow<R>) {
     use webkit2gtk::{
-        CookieAcceptPolicy, CookieManagerExt, SettingsExt, WebsiteDataManagerExt, WebViewExt,
+        CookieAcceptPolicy, CookieManagerExt, SettingsExt, WebContextExt, WebViewExt,
+        WebsiteDataManagerExt,
     };
 
-    let _ = window.with_webview(|webview| {
+    let debug = std::env::var_os("MSTEAMS_DEBUG").is_some();
+
+    let _ = window.with_webview(move |webview| {
         let view = webview.inner();
 
         if let Some(settings) = view.settings() {
@@ -142,18 +159,98 @@ fn configure_webkit<R: Runtime>(window: &WebviewWindow<R>) {
             // When MSTEAMS_DEBUG is set, mirror the page's console into stdout
             // and turn on the inspector so the wrapper can be debugged from a
             // terminal.
-            if std::env::var_os("MSTEAMS_DEBUG").is_some() {
+            if debug {
                 settings.set_enable_write_console_messages_to_stdout(true);
                 settings.set_enable_developer_extras(true);
             }
         }
 
-        if let Some(manager) = view.website_data_manager() {
+        let manager = view.website_data_manager();
+        if let Some(manager) = &manager {
             manager.set_itp_enabled(false);
-            if let Some(cookies) = manager.cookie_manager() {
-                cookies.set_accept_policy(CookieAcceptPolicy::Always);
+            if debug {
+                eprintln!("[msteams] ITP enabled: {}", manager.is_itp_enabled());
             }
         }
+
+        // Both managers wrap the same network session, but setting the policy on
+        // each of them keeps it applied whichever one the session was created
+        // from. Note that disabling ITP resets the accept policy back to
+        // `ExclusivelyFromMainDocumentDomain`, so the order below matters.
+        let cookie_managers = [
+            manager.as_ref().and_then(|m| m.cookie_manager()),
+            view.context().and_then(|c| c.cookie_manager()),
+        ];
+        for cookies in cookie_managers.into_iter().flatten() {
+            cookies.set_accept_policy(CookieAcceptPolicy::Always);
+            if debug {
+                cookies.accept_policy(None::<&gio::Cancellable>, |policy| {
+                    eprintln!("[msteams] cookie accept policy: {policy:?}");
+                });
+            }
+        }
+    });
+}
+
+/// Installs the "external links open in the system browser" policy directly on
+/// the WebKitGTK webview.
+///
+/// Tauri's `on_navigation` is a thin wrapper around WebKitGTK's
+/// `decide-policy` signal, which is emitted for **every** frame — including
+/// sub-frames. Teams loads part of itself in hidden iframes (the
+/// third-party-cookie probe, widgets, …); blocking those because their host is
+/// not in `TRUSTED_HOSTS` hijacked them into the user's browser and made Teams
+/// believe the browser was broken.
+///
+/// WebKitGTK does not expose whether a navigation targets the main frame, so
+/// the policy is only applied where it cannot break the page: user-initiated
+/// navigations (link clicks and form submissions) to hosts outside
+/// `TRUSTED_HOSTS` are opened in the browser, everything else — sub-frames,
+/// redirects and script-driven loads — is left alone.
+#[cfg(target_os = "linux")]
+fn install_navigation_policy<R: Runtime>(window: &WebviewWindow<R>, app: AppHandle<R>) {
+    use webkit2gtk::{
+        glib::Cast, NavigationPolicyDecision, NavigationPolicyDecisionExt, PolicyDecisionExt,
+        PolicyDecisionType, URIRequestExt, WebViewExt,
+    };
+
+    let _ = window.with_webview(move |webview| {
+        let view = webview.inner();
+
+        view.connect_decide_policy(move |_view, decision, decision_type| {
+            if decision_type != PolicyDecisionType::NavigationAction {
+                return false;
+            }
+
+            let Some(action) = decision
+                .clone()
+                .downcast::<NavigationPolicyDecision>()
+                .ok()
+                .and_then(|decision| decision.navigation_action())
+            else {
+                return false;
+            };
+
+            let Some(url) = action
+                .request()
+                .and_then(|request| request.uri())
+                .and_then(|uri| uri.parse::<Url>().ok())
+            else {
+                return false;
+            };
+
+            if is_trusted(&url) || !action.is_user_gesture() {
+                return false;
+            }
+
+            if std::env::var_os("MSTEAMS_DEBUG").is_some() {
+                eprintln!("[msteams] external link: {url}");
+            }
+
+            open_external(&app, &url);
+            decision.ignore();
+            true
+        });
     });
 }
 
@@ -170,28 +267,44 @@ fn create_window<R: Runtime>(
     let popup_app = app.clone();
     let popup_dir = data_dir.clone();
 
-    let builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(url))
+    // The window is built on `about:blank` and navigated to Teams afterwards,
+    // so that the WebKitGTK tweaks below (third-party cookies above all) are in
+    // place *before* the first request goes out. Teams runs its third-party
+    // cookie probe right at start-up and treats a blocked probe as "this
+    // browser is broken".
+    let blank = Url::parse("about:blank").expect("about:blank is a valid URL");
+    let builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(blank))
         .title("Microsoft Teams")
         .data_directory(data_dir)
         .min_inner_size(400.0, 300.0)
         .initialization_script(INJECT_JS);
 
+    // Keep Teams/Microsoft navigation in-app, send the rest to the browser. On
+    // Linux the policy is installed on the WebKitGTK webview instead, because
+    // Tauri's handler also sees (and would block) sub-frame navigations.
+    #[cfg(not(target_os = "linux"))]
+    let builder = builder.on_navigation(move |url| {
+        if is_trusted(url) {
+            true
+        } else {
+            open_external(&nav_app, url);
+            false
+        }
+    });
+
     let builder = builder
-        // Keep Teams/Microsoft navigation in-app, send the rest to the browser.
-        .on_navigation(move |url| {
-            if is_trusted(url) {
-                true
-            } else {
-                open_external(&nav_app, url);
-                false
-            }
-        })
         // `window.open` / target="_blank": complete OAuth popups in-app, open
         // ordinary web links in the system browser.
         .on_new_window(move |url, _features| {
             if is_trusted(&url) {
                 let label = format!("auth-{}", WINDOW_SEQ.fetch_add(1, Ordering::Relaxed));
-                match create_window(&popup_app, &label, url, WindowKind::Popup, popup_dir.clone()) {
+                match create_window(
+                    &popup_app,
+                    &label,
+                    url,
+                    WindowKind::Popup,
+                    popup_dir.clone(),
+                ) {
                     Ok(window) => NewWindowResponse::Create { window },
                     Err(_) => NewWindowResponse::Deny,
                 }
@@ -208,9 +321,15 @@ fn create_window<R: Runtime>(
     }?;
 
     // Teams needs third-party cookies and WebRTC; WebKitGTK disables both by
-    // default.
+    // default. Both are applied straight to the webview that was just created,
+    // before the navigation below starts the first request.
     #[cfg(target_os = "linux")]
-    configure_webkit(&window);
+    {
+        configure_webkit(&window);
+        install_navigation_policy(&window, nav_app);
+    }
+
+    window.navigate(url)?;
 
     Ok(window)
 }
@@ -416,6 +535,20 @@ fn show_main<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+/// Closes the authentication popups (`auth-*`).
+///
+/// Teams closes those windows itself once the OAuth flow finishes, but the page
+/// can only destroy its own web view (`window.close()`), which leaves the window
+/// shell behind as an empty frame. Closing them when the user comes back to the
+/// main window keeps sign-in from littering the desktop.
+fn close_popups<R: Runtime>(app: &AppHandle<R>) {
+    for (label, window) in app.webview_windows() {
+        if label.starts_with("auth-") {
+            let _ = window.destroy();
+        }
+    }
+}
+
 /// Called from the injected script whenever the unread count changes.
 #[tauri::command]
 fn set_unread_count(app: AppHandle, unread: tauri::State<'_, Unread>, count: u32) {
@@ -427,12 +560,7 @@ fn set_unread_count(app: AppHandle, unread: tauri::State<'_, Unread>, count: u32
 /// notification fired by Teams.
 #[tauri::command]
 fn show_notification(app: AppHandle, title: String, body: String) {
-    let _ = app
-        .notification()
-        .builder()
-        .title(title)
-        .body(body)
-        .show();
+    let _ = app.notification().builder().title(title).body(body).show();
 }
 
 /// Application entry point shared by the desktop binary and (potentially)
@@ -441,7 +569,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
-        .invoke_handler(tauri::generate_handler![set_unread_count, show_notification])
+        .invoke_handler(tauri::generate_handler![
+            set_unread_count,
+            show_notification
+        ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir).ok();
@@ -449,7 +580,8 @@ pub fn run() {
             app.manage(Unread(AtomicU32::new(0)));
 
             // System tray: click to restore the window, right-click for the menu.
-            let show_i = MenuItem::with_id(app, "show", "Show Microsoft Teams", true, None::<&str>)?;
+            let show_i =
+                MenuItem::with_id(app, "show", "Show Microsoft Teams", true, None::<&str>)?;
             let hide_i = MenuItem::with_id(app, "hide", "Hide to tray", true, None::<&str>)?;
             let separator = PredefinedMenuItem::separator(app)?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -457,7 +589,9 @@ pub fn run() {
 
             let mut tray = TrayIconBuilder::with_id("main")
                 .menu(&menu)
-                .show_menu_on_left_click(true)
+                // The menu is for the right button: a left click restores the
+                // window (see `on_tray_icon_event` below).
+                .show_menu_on_left_click(false)
                 .tooltip("Microsoft Teams")
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main(app),
@@ -485,7 +619,17 @@ pub fn run() {
             tray.build(app)?;
 
             let url = Url::parse(TEAMS_URL).expect("TEAMS_URL is a valid URL");
-            create_window(app.handle(), "main", url, WindowKind::Main, data_dir)?;
+            let main = create_window(app.handle(), "main", url, WindowKind::Main, data_dir)?;
+
+            // Teams closes its sign-in popups from JavaScript, which only
+            // destroys their web view; drop the leftover windows once the user is
+            // back in the main window.
+            let handle = app.handle().clone();
+            main.on_window_event(move |event| {
+                if matches!(event, tauri::WindowEvent::Focused(true)) {
+                    close_popups(&handle);
+                }
+            });
 
             Ok(())
         })
@@ -510,9 +654,62 @@ mod tests {
         Image::new_owned(vec![0u8; (size * size * 4) as usize], size, size)
     }
 
+    fn url(s: &str) -> Url {
+        Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn microsoft_and_teams_hosts_are_trusted() {
+        for host in [
+            "https://teams.microsoft.com/v2/",
+            "https://teams.cloud.microsoft/",
+            "https://login.microsoftonline.com/common/oauth2/authorize",
+            "https://login.live.com/",
+            "https://substrate.office.com/api",
+            "https://go.microsoft.com/fwlink/?linkid=1",
+            "https://res-1.cdn.office.net/files/app.js",
+            "https://aadcdn.msftauth.net/shared/1/oauth2",
+        ] {
+            assert!(is_trusted(&url(host)), "{host} should be trusted");
+        }
+    }
+
+    #[test]
+    fn teams_cdn_is_trusted_so_its_report_pages_stay_in_app() {
+        assert!(is_trusted(&url(
+            "https://teams.public.onecdn.static.microsoft/teams-modular-packages/\
+             react-web-client/1/report-third-party-cookies.html"
+        )));
+    }
+
+    #[test]
+    fn lookalike_and_third_party_hosts_are_not_trusted() {
+        for host in [
+            "https://evil.com/",
+            "https://microsoft.com.evil.com/",
+            "https://notmicrosoft.com/",
+            "https://static.microsoft.evil.com/",
+            "https://teams.microsoft.com.co/",
+            "https://example.com/?redirect=https://teams.microsoft.com/",
+        ] {
+            assert!(!is_trusted(&url(host)), "{host} must not be trusted");
+        }
+    }
+
+    #[test]
+    fn non_web_schemes_are_not_trusted() {
+        for target in [
+            "mailto:someone@example.com",
+            "tel:+123456",
+            "javascript:alert(1)",
+        ] {
+            assert!(!is_trusted(&url(target)), "{target} must not be trusted");
+        }
+    }
+
     #[test]
     fn zero_count_leaves_icon_untouched() {
-        let base = Image::new_owned(vec![1, 2, 3, 255].repeat(16 * 16), 16, 16);
+        let base = Image::new_owned([1, 2, 3, 255].repeat(16 * 16), 16, 16);
         let out = render_badge(&base, 0);
         assert_eq!(out.rgba(), base.rgba());
     }
