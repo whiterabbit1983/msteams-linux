@@ -1,0 +1,214 @@
+name: release
+
+# Builds the Linux AppImage and publishes it to a GitHub release.
+#
+#   push a tag matching v*       -> check, build, publish a release for that tag
+#   workflow_dispatch            -> check, build, publish (prerelease); optionally
+#                                   pass a tag in the "tag" input to update that
+#                                   release instead
+#   pull request touching Rust/  -> check only, nothing is published
+#     JS sources
+#
+# The AppImage is produced by the upstream bundler (`tauri build --bundles
+# appimage`); `scripts/build-appimage.sh` exists for the root-less/sysroot setup
+# and is not needed on a CI runner, which has the system dev packages.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish under (defaults to a build-<run> prerelease tag)"
+        required: false
+        type: string
+  pull_request:
+    paths:
+      - "src-tauri/**"
+      - "dist/**"
+      - "scripts/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/release.yml"
+
+# Least privilege: only the publish job may write to the repository.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libssl-dev \
+            librsvg2-dev \
+            pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Format
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        working-directory: src-tauri
+        run: cargo test --locked
+
+  build-appimage:
+    name: Build AppImage
+    # Skipped for pull requests: those only run the checks above.
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A manual run may ask for a tag other than the checked-out ref, so all
+          # tags have to be available for the checkout below.
+          fetch-depth: 0
+
+      - name: Check out the requested tag
+        # On a manual run the workflow may have been started from a branch while
+        # the user asked for a specific tag, so check that tag out explicitly.
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            git fetch --depth 1 origin "refs/tags/${{ inputs.tag }}:refs/tags/${{ inputs.tag }}"
+            git checkout "${{ inputs.tag }}"
+          fi
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libssl-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            squashfs-tools \
+            pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+
+      # The bundler downloads AppRun, linuxdeploy and the appimage plugin into
+      # ~/.cache/tauri on first use; caching them keeps rebuilds fast.
+      - name: Cache AppImage tooling
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/tauri
+          key: tauri-appimage-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Build the AppImage
+        run: npx tauri build --bundles appimage
+
+      # Tauri's default file name contains spaces ("Microsoft Teams_1.0.0_amd64.AppImage"),
+      # which end up percent-encoded in the download URL. Rename it to the same
+      # name scripts/build-appimage.sh produces.
+      - name: Collect the artifact
+        run: |
+          mkdir -p dist
+          src="src-tauri/target/release/bundle/appimage"
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          src="$(find "$src" -maxdepth 1 -name '*.AppImage' -print -quit)"
+          if [ -z "$src" ]; then
+            echo "::error::no AppImage was produced"
+            exit 1
+          fi
+          mv "$src" "dist/Microsoft_Teams-${version}-x86_64.AppImage"
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: dist/*.AppImage
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish release
+    needs: build-appimage
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download the AppImage
+        uses: actions/download-artifact@v4
+        with:
+          name: appimage
+          path: dist
+
+      - name: Resolve the release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=build-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          # A manual run without an explicit tag is just a build, not a release.
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.tag == '' }}
+          draft: false
+          generate_release_notes: true
+          files: dist/*.AppImage

@@ -180,6 +180,31 @@ ships the pieces the webkit gtk plugin does not handle itself:
 Run `npm run tauri build -- --bundles appimage` once first if the linuxdeploy /
 AppRun cache is missing (it may fail at the gtk step; that populates the cache).
 
+### GitHub Actions
+
+`.github/workflows/release.yml` builds and publishes the AppImage:
+
+| Trigger | What happens |
+| --- | --- |
+| push tag `v*` | `fmt`/`clippy`/`tests` → build AppImage → publish a GitHub release for that tag |
+| **Actions → Run workflow** | same, published as a prerelease; fill the optional `tag` input to build *and* check out that tag |
+| pull request touching `src-tauri/**`, `dist/**`, `scripts/**`, `package*.json` | checks only, nothing is published |
+
+The runner installs the system dependencies from the
+[prerequisites](#prerequisites) list, so no `.tauri-sysroot` is involved and the
+**upstream** bundler (`npx tauri build --bundles appimage`) is used — it already
+bundles the WebKit helper processes and `libayatana-appindicator3` that
+`scripts/build-appimage.sh` has to add by hand for the sysroot setup. The
+resulting file is renamed to `Microsoft_Teams-<version>-x86_64.AppImage`
+(Tauri's default name contains spaces, which end up percent-encoded in download
+URLs) and uploaded as a release asset.
+
+Rust, npm and the `~/.cache/tauri` AppImage tooling are cached between runs.
+`contents: write` is granted to the `publish` job only.
+
+Publishing needs no extra setup beyond the default `GITHUB_TOKEN`, since the
+workflow pushes to the same repository it is triggered from.
+
 ## Build & run
 
 Using the Tauri CLI (the normal workflow):
