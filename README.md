@@ -62,8 +62,8 @@ The fix has three parts:
 2. `static.microsoft` (the OneCDN bucket Teams serves itself from) is part of
    `TRUSTED_HOSTS`, so Teams' own report pages stay inside the app;
 3. the third-party cookie settings are applied *before* the window navigates to
-   Teams, instead of right after a window that was already loading the URL was
-   built.
+   Teams. Navigation waits until WebKitGTK's network process confirms the new
+   cookie policy, so the first cookie probe cannot race the asynchronous update.
 
 ## Layout
 
@@ -76,6 +76,7 @@ The fix has three parts:
 ├── scripts/
 │   ├── setup-sysroot.sh      # root-less build deps (fallback, see below)
 │   ├── build.sh              # build/run helper that wires up the sysroot
+│   ├── build-webrtc-webkit.sh # local WebKitGTK with WebRTC and media support
 │   └── build-appimage.sh     # Linux AppImage packaging for the sysroot setup
 └── src-tauri/
     ├── Cargo.toml
@@ -143,19 +144,35 @@ Verify it directly:
 typeof RTCPeerConnection   // "undefined" on stock Ubuntu WebKitGTK
 ```
 
-To get working calls you need a WebKitGTK built with WebRTC, for example:
+The wrapper cannot add WebRTC to an already installed WebKitGTK, so the project
+builds a compatible local copy instead of hiding the calling error:
 
 ```bash
-# build WebKit from https://webkit.org with the GTK port and
-#   -DENABLE_MEDIA_STREAM=ON -DENABLE_WEB_RTC=ON
-# (or -DENABLE_EXPERIMENTAL_FEATURES=ON) and point the app at it, e.g.
-LD_LIBRARY_PATH=/path/to/webkit/lib \
-WEBKIT_EXEC_PATH=/path/to/webkit/libexec/webkit2gtk-4.1 \
-  ./scripts/build.sh --run
+./scripts/build-webrtc-webkit.sh  # once; a large local build, no root required
+./scripts/build.sh --run
 ```
 
-This is a known WebKitGTK/distro limitation, not something the wrapper can
-patch around. Messaging, files and the rest of Teams work normally without it.
+The build enables `ENABLE_MEDIA_STREAM`, `ENABLE_WEB_RTC` and the GStreamer
+WebRTC backend. `build.sh` automatically points both the app and WebKit's helper
+processes at this local copy. The AppImage build packages the same copy so calls
+also work without replacing the system's WebKitGTK. Camera and microphone access
+must be allowed by the desktop environment. For running from source on
+Debian/Ubuntu/Mint, install the media runtime plugins:
+
+```bash
+sudo apt install gstreamer1.0-plugins-bad gstreamer1.0-plugins-good \
+    gstreamer1.0-alsa gstreamer1.0-gl gstreamer1.0-pipewire \
+    gstreamer1.0-pulseaudio
+```
+
+To verify the runtime without calling a Teams contact, run the WebRTC smoke
+example. It opens the camera and microphone, negotiates two local peer
+connections, and requires ICE plus inbound audio/video RTP before passing. No
+recording is saved and no media leaves the machine.
+
+```bash
+./scripts/build.sh --run --example webrtc-smoke
+```
 
 ## AppImage
 
@@ -169,11 +186,11 @@ pkg-config, which returns sysroot-prefixed paths, for the runtime data
 directories). The script instead calls linuxdeploy with a clean environment and
 ships the pieces the webkit gtk plugin does not handle itself:
 
-- `~/.cache/tauri/AppRun-x86_64` — the Tauri AppRun (it chdir's into
-  `$APPDIR/usr`, which the gtk plugin's `././lib/...` rewrite relies on),
-- `/usr/lib/<arch>/webkit2gtk-4.1/` — the WebKit helper processes and
-  injected-bundle, without which the app exits with *"Unable to spawn a new
-  child process"*,
+- `~/.cache/tauri/AppRun-x86_64` — the Tauri AppRun, wrapped by a small launcher
+  that points WebKit at paths relative to the mounted AppImage,
+- the local WebKitGTK/JavaScriptCore libraries, helper processes and
+  injected-bundle, with no dependency on the distro WebKit build,
+- the GStreamer runtime plugins, including WebRTC and audio/video support,
 - `libayatana-appindicator3` (loaded by `dlopen`, invisible to linuxdeploy's
   ldd scan) with its full dependency closure.
 
@@ -190,16 +207,12 @@ AppRun cache is missing (it may fail at the gtk step; that populates the cache).
 | **Actions → Run workflow** | same, published as a prerelease; fill the optional `tag` input to build *and* check out that tag |
 | pull request touching `src-tauri/**`, `dist/**`, `scripts/**`, `package*.json` | checks only, nothing is published |
 
-The runner installs the system dependencies from the
-[prerequisites](#prerequisites) list, so no `.tauri-sysroot` is involved and the
-**upstream** bundler (`npx tauri build --bundles appimage`) is used — it already
-bundles the WebKit helper processes and `libayatana-appindicator3` that
-`scripts/build-appimage.sh` has to add by hand for the sysroot setup. The
-resulting file is renamed to `Microsoft_Teams-<version>-x86_64.AppImage`
-(Tauri's default name contains spaces, which end up percent-encoded in download
-URLs) and uploaded as a release asset.
+The release job runs the same `build-webrtc-webkit.sh` and `build-appimage.sh`
+scripts as a local build. The resulting file is renamed to
+`Microsoft_Teams-<version>-x86_64.AppImage` and uploaded as a release asset.
 
-Rust, npm and the `~/.cache/tauri` AppImage tooling are cached between runs.
+Rust, npm, WebKitGTK and the `~/.cache/tauri` AppImage tooling are cached between
+runs.
 `contents: write` is granted to the `publish` job only.
 
 Publishing needs no extra setup beyond the default `GITHUB_TOKEN`, since the

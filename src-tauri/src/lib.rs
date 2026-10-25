@@ -132,7 +132,8 @@ fn permission_response(kind: PermissionKind) -> PermissionResponse {
 ///   site are dropped. Teams uses third-party cookies during sign-in, and its
 ///   third-party-cookie probe (`report-third-party-cookies.html`, loaded in a
 ///   hidden iframe) fails without them, which makes Teams show that error page.
-/// * media capabilities — the `MediaCapabilities` API used to negotiate codecs.
+/// * media capabilities — the `MediaCapabilities` API used to negotiate codecs,
+///   and `MediaStream` access to the camera and microphone.
 /// * WebRTC — requests `RTCPeerConnection` support (`enable-webrtc`). This is
 ///   *not* enough on its own: the setting is a no-op unless the system WebKitGTK
 ///   was compiled with `ENABLE_WEB_RTC`. Ubuntu's `libwebkit2gtk-4.1-0` is built
@@ -141,19 +142,24 @@ fn permission_response(kind: PermissionKind) -> PermissionResponse {
 ///   the app." The call is kept so the wrapper uses WebRTC on WebKitGTK builds
 ///   that do include it.
 #[cfg(target_os = "linux")]
-fn configure_webkit<R: Runtime>(window: &WebviewWindow<R>) {
+fn configure_webkit<R: Runtime>(window: &WebviewWindow<R>, url: Url) {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
     use webkit2gtk::{
         CookieAcceptPolicy, CookieManagerExt, SettingsExt, WebContextExt, WebViewExt,
         WebsiteDataManagerExt,
     };
 
     let debug = std::env::var_os("MSTEAMS_DEBUG").is_some();
+    let navigate_window = window.clone();
 
     let _ = window.with_webview(move |webview| {
         let view = webview.inner();
 
         if let Some(settings) = view.settings() {
             settings.set_enable_webrtc(true);
+            settings.set_enable_media_stream(true);
             settings.set_enable_media_capabilities(true);
 
             // When MSTEAMS_DEBUG is set, mirror the page's console into stdout
@@ -177,17 +183,37 @@ fn configure_webkit<R: Runtime>(window: &WebviewWindow<R>) {
         // each of them keeps it applied whichever one the session was created
         // from. Note that disabling ITP resets the accept policy back to
         // `ExclusivelyFromMainDocumentDomain`, so the order below matters.
-        let cookie_managers = [
+        let cookie_managers: Vec<_> = [
             manager.as_ref().and_then(|m| m.cookie_manager()),
             view.context().and_then(|c| c.cookie_manager()),
-        ];
-        for cookies in cookie_managers.into_iter().flatten() {
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        if cookie_managers.is_empty() {
+            let _ = navigate_window.navigate(url);
+            return;
+        }
+
+        // Setting the policy only queues a request to the network process. Wait
+        // for the read-back before Teams can run its third-party-cookie probe.
+        let pending = Rc::new(Cell::new(cookie_managers.len()));
+        for cookies in cookie_managers {
             cookies.set_accept_policy(CookieAcceptPolicy::Always);
-            if debug {
-                cookies.accept_policy(None::<&gio::Cancellable>, |policy| {
+
+            let pending = Rc::clone(&pending);
+            let window = navigate_window.clone();
+            let url = url.clone();
+            cookies.accept_policy(None::<&gio::Cancellable>, move |policy| {
+                if debug {
                     eprintln!("[msteams] cookie accept policy: {policy:?}");
-                });
-            }
+                }
+                pending.set(pending.get() - 1);
+                if pending.get() == 0 {
+                    let _ = window.navigate(url);
+                }
+            });
         }
     });
 }
@@ -321,14 +347,14 @@ fn create_window<R: Runtime>(
     }?;
 
     // Teams needs third-party cookies and WebRTC; WebKitGTK disables both by
-    // default. Both are applied straight to the webview that was just created,
-    // before the navigation below starts the first request.
+    // default. Navigation starts only after the cookie policy is confirmed.
     #[cfg(target_os = "linux")]
     {
-        configure_webkit(&window);
+        configure_webkit(&window, url);
         install_navigation_policy(&window, nav_app);
     }
 
+    #[cfg(not(target_os = "linux"))]
     window.navigate(url)?;
 
     Ok(window)

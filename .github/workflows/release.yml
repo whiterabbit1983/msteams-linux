@@ -9,9 +9,8 @@ name: release
 #   pull request touching Rust/  -> check only, nothing is published
 #     JS sources
 #
-# The AppImage is produced by the upstream bundler (`tauri build --bundles
-# appimage`); `scripts/build-appimage.sh` exists for the root-less/sysroot setup
-# and is not needed on a CI runner, which has the system dev packages.
+# Both local and CI AppImages bundle the WebRTC-enabled WebKitGTK built by
+# scripts/build-webrtc-webkit.sh; distro WebKitGTK does not provide WebRTC.
 
 on:
   push:
@@ -126,6 +125,12 @@ jobs:
             librsvg2-dev \
             libayatana-appindicator3-dev \
             squashfs-tools \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-alsa \
+            gstreamer1.0-gl \
+            gstreamer1.0-pipewire \
+            gstreamer1.0-pulseaudio \
             pkg-config
 
       - name: Install Rust
@@ -143,31 +148,33 @@ jobs:
 
       - run: npm ci --no-audit --no-fund
 
-      # The bundler downloads AppRun, linuxdeploy and the appimage plugin into
-      # ~/.cache/tauri on first use; caching them keeps rebuilds fast.
       - name: Cache AppImage tooling
         uses: actions/cache@v4
         with:
           path: ~/.cache/tauri
           key: tauri-appimage-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
 
-      - name: Build the AppImage
+      - name: Cache WebRTC-enabled WebKitGTK
+        uses: actions/cache@v4
+        with:
+          path: |
+            .webrtc-webkit/install
+            .webrtc-webkit/build
+          key: webrtc-webkit-${{ runner.os }}-${{ hashFiles('scripts/build-webrtc-webkit.sh') }}
+
+      - name: Populate AppImage tooling
         run: npx tauri build --bundles appimage
 
-      # Tauri's default file name contains spaces ("Microsoft Teams_1.0.0_amd64.AppImage"),
-      # which end up percent-encoded in the download URL. Rename it to the same
-      # name scripts/build-appimage.sh produces.
+      - name: Build WebKitGTK and the AppImage
+        run: |
+          ./scripts/build-webrtc-webkit.sh
+          ./scripts/build-appimage.sh
+
       - name: Collect the artifact
         run: |
           mkdir -p dist
-          src="src-tauri/target/release/bundle/appimage"
           version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-          src="$(find "$src" -maxdepth 1 -name '*.AppImage' -print -quit)"
-          if [ -z "$src" ]; then
-            echo "::error::no AppImage was produced"
-            exit 1
-          fi
-          mv "$src" "dist/Microsoft_Teams-${version}-x86_64.AppImage"
+          mv Microsoft_Teams-x86_64.AppImage "dist/Microsoft_Teams-${version}-x86_64.AppImage"
           ls -la dist
 
       - uses: actions/upload-artifact@v4

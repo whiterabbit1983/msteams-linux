@@ -2062,6 +2062,7 @@ version = "1.0.0"
 dependencies = [
  "gio",
  "glib",
+ "gtk",
  "serde",
  "serde_json",
  "tauri",

@@ -5,21 +5,16 @@
 # The upstream Tauri AppImage bundler (`tauri build --bundles appimage`) runs
 # linuxdeploy's gtk plugin, which is confused by our root-less `.tauri-sysroot`
 # (PKG_CONFIG_SYSROOT_DIR makes pkg-config return sysroot-prefixed paths). This
-# script instead drives linuxdeploy by hand with a *clean* environment so it
-# resolves libraries against the real system, which is what the resulting
-# AppImage should bundle anyway.
-#
-# It also bundles the WebKitGTK helper processes (WebKitWebProcess /
-# WebKitNetworkProcess / injected-bundle). The gtk plugin rewrites the compiled
-# absolute path inside libwebkit2gtk from `/usr/lib/...` to `././/lib/...`,
-# which the Tauri AppRun resolves relative to `$APPDIR/usr`; without those
-# helpers the app exits with "Unable to spawn a new child process".
+# script instead drives linuxdeploy by hand with a clean pkg-config environment.
+# WebKitGTK comes from the local WebRTC-enabled build; its helper-process and
+# injected-bundle paths are made relative to the mounted AppImage by AppRun.
 #
 # Usage:  ./scripts/build-appimage.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SYSROOT="$ROOT/.tauri-sysroot"
+WEBKIT_PREFIX="$ROOT/.webrtc-webkit/install"
 ARCH="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || gcc -print-multiarch 2>/dev/null || echo x86_64-linux-gnu)"
 CACHE="$HOME/.cache/tauri"
 
@@ -44,6 +39,27 @@ if [[ -d "$SYSROOT/usr/lib/$ARCH/pkgconfig" ]]; then
   echo "==> using local sysroot: $SYSROOT"
 fi
 
+HELPER_SRC="$WEBKIT_PREFIX/libexec/webkit2gtk-4.1"
+for f in "$WEBKIT_PREFIX/lib/libwebkit2gtk-4.1.so" \
+         "$WEBKIT_PREFIX/lib/libjavascriptcoregtk-4.1.so" \
+         "$WEBKIT_PREFIX/lib/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so" \
+         "$HELPER_SRC/WebKitWebProcess" \
+         "$HELPER_SRC/WebKitNetworkProcess"; do
+  [[ -e "$f" ]] || {
+    echo "ERROR: WebRTC-enabled WebKitGTK is missing: $f" >&2
+    echo "Run ./scripts/build-webrtc-webkit.sh first." >&2
+    exit 1
+  }
+done
+GST_PLUGINS="$SYSROOT/usr/lib/$ARCH/gstreamer-1.0"
+GST_HELPERS="$SYSROOT/usr/lib/$ARCH/gstreamer1.0/gstreamer-1.0"
+[[ -f "$GST_PLUGINS/libgstwebrtc.so" && -x "$GST_HELPERS/gst-plugin-scanner" ]] || {
+  echo "ERROR: local GStreamer WebRTC plugins/helpers are missing" >&2
+  echo "Run ./scripts/build-webrtc-webkit.sh first." >&2
+  exit 1
+}
+export LD_LIBRARY_PATH="$WEBKIT_PREFIX/lib:$SYSROOT/usr/lib/$ARCH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
 echo "==> building release binary…"
 ( cd "$ROOT/src-tauri" && cargo build --release )
 [[ -x "$BIN" ]] || { echo "ERROR: $BIN was not produced" >&2; exit 1; }
@@ -52,6 +68,7 @@ echo "==> building release binary…"
 missing=0
 for f in "$LINUXDEPLOY" \
          "$CACHE/linuxdeploy-plugin-gtk.sh" \
+         "$CACHE/linuxdeploy-plugin-gstreamer.sh" \
          "$CACHE/linuxdeploy-plugin-appimage.AppImage" \
          "$APPRUN"; do
   [[ -e "$f" ]] || { echo "ERROR: missing $f" >&2; missing=1; }
@@ -66,7 +83,22 @@ fi
 echo "==> assembling AppDir…"
 rm -rf "$APPDIR"
 install -Dm755 "$BIN" "$APPDIR/usr/bin/msteams-tauri"
-install -Dm755 "$APPRUN" "$APPDIR/AppRun"
+install -Dm755 "$APPRUN" "$APPDIR/usr/AppRun"
+
+cat > "$APPDIR/AppRun" <<'EOF'
+#!/bin/sh
+set -eu
+APPDIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+export APPDIR
+export LD_LIBRARY_PATH="$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export WEBKIT_EXEC_PATH="$APPDIR/usr/libexec/webkit2gtk-4.1"
+export WEBKIT_INJECTED_BUNDLE_PATH="$APPDIR/usr/lib/webkit2gtk-4.1/injected-bundle"
+for hook in "$APPDIR"/apprun-hooks/*.sh; do
+  [ ! -f "$hook" ] || . "$hook"
+done
+exec "$APPDIR/usr/AppRun" "$@"
+EOF
+chmod 755 "$APPDIR/AppRun"
 
 mkdir -p "$APPDIR/usr/share/applications" \
          "$APPDIR/usr/share/icons/hicolor/128x128/apps"
@@ -87,12 +119,9 @@ EOF
 cp "$APPDIR/microsoft-teams.desktop" \
    "$APPDIR/usr/share/applications/microsoft-teams.desktop"
 
-# WebKitGTK helper processes (relative to $APPDIR/usr, matching the gtk plugin's
-# `/usr` -> `././` rewrite inside libwebkit2gtk).
-HELPER_SRC="/usr/lib/$ARCH/webkit2gtk-4.1"
-[[ -d "$HELPER_SRC" ]] || { echo "ERROR: $HELPER_SRC not found" >&2; exit 1; }
-mkdir -p "$APPDIR/usr/lib/$ARCH"
-cp -a "$HELPER_SRC" "$APPDIR/usr/lib/$ARCH/"
+cp -a "$WEBKIT_PREFIX/lib/." "$APPDIR/usr/lib/"
+mkdir -p "$APPDIR/usr/libexec"
+cp -a "$HELPER_SRC" "$APPDIR/usr/libexec/"
 
 # The tray icon is loaded through dlopen ("libayatana-appindicator3.so.1"),
 # which linuxdeploy does not see via ldd. Copy the real libraries (linuxdeploy
@@ -124,10 +153,13 @@ rm -f "$WORK"/*.AppImage
 cd "$WORK"
 PATH="$CACHE:$PATH" \
 APPIMAGE_EXTRACT_AND_RUN=1 \
+GSTREAMER_INCLUDE_BAD_PLUGINS=1 \
+GSTREAMER_PLUGINS_DIR="$GST_PLUGINS" \
+GSTREAMER_HELPERS_DIR="$GST_HELPERS" \
 OUTPUT="$OUT_NAME" \
 env -u PKG_CONFIG_SYSROOT_DIR -u PKG_CONFIG_PATH \
     -u PKG_CONFIG_ALLOW_SYSTEM_CFLAGS -u PKG_CONFIG_ALLOW_SYSTEM_LIBS -u LIBRARY_PATH \
-  "$LINUXDEPLOY" --appdir "$APPDIR" --plugin gtk --output appimage
+  "$LINUXDEPLOY" --appdir "$APPDIR" --plugin gtk --plugin gstreamer --output appimage
 
 produced="$(find "$WORK" -maxdepth 1 -name '*.AppImage' | head -1)"
 [[ -n "$produced" ]] || { echo "ERROR: linuxdeploy produced no AppImage" >&2; exit 1; }

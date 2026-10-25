@@ -11,6 +11,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SYSROOT="$ROOT/.tauri-sysroot"
+WEBKIT_PREFIX="$ROOT/.webrtc-webkit/install"
 ARCH="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || gcc -print-multiarch 2>/dev/null || echo x86_64-linux-gnu)"
 
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -24,6 +25,20 @@ if [[ -d "$SYSROOT/usr/lib/$ARCH/pkgconfig" ]]; then
   echo "==> using local sysroot: $SYSROOT"
 else
   echo "==> no local sysroot found, relying on system dev packages"
+fi
+
+if [[ -d "$WEBKIT_PREFIX/lib" ]]; then
+  export LD_LIBRARY_PATH="$WEBKIT_PREFIX/lib:$SYSROOT/usr/lib/$ARCH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export WEBKIT_EXEC_PATH="$WEBKIT_PREFIX/libexec/webkit2gtk-4.1"
+  export WEBKIT_INJECTED_BUNDLE_PATH="$WEBKIT_PREFIX/lib/webkit2gtk-4.1/injected-bundle"
+  GST_PLUGINS="$SYSROOT/usr/lib/$ARCH/gstreamer-1.0"
+  GST_HELPERS="$SYSROOT/usr/lib/$ARCH/gstreamer1.0/gstreamer-1.0"
+  if [[ -d "$GST_PLUGINS" ]]; then
+    export GST_PLUGIN_SYSTEM_PATH_1_0="$GST_PLUGINS"
+    export GST_PLUGIN_PATH_1_0="$GST_PLUGINS"
+    export GST_PLUGIN_SCANNER_1_0="$GST_HELPERS/gst-plugin-scanner"
+  fi
+  echo "==> using WebRTC-enabled WebKitGTK: $WEBKIT_PREFIX"
 fi
 
 cd "$ROOT/src-tauri"
