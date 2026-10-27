@@ -33,7 +33,9 @@ cd "$SYSROOT/.debs"
     gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-good \
     gstreamer1.0-alsa \
-    gstreamer1.0-gl
+    gstreamer1.0-gl \
+    gstreamer1.0-pipewire \
+    gstreamer1.0-pulseaudio
 } | sort -u > "$WORK/build-packages.txt"
 
 while read -r pkg; do
@@ -67,6 +69,14 @@ echo "$SHA256  $TARBALL" | sha256sum --check
 
 if [[ ! -d "$WORK/webkitgtk-$VERSION" ]]; then
   tar -xJf "$TARBALL" -C "$WORK"
+fi
+
+PATCH="$ROOT/scripts/webkitgtk-relocatable.patch"
+if patch --dry-run --silent -p1 -d "$WORK/webkitgtk-$VERSION" < "$PATCH"; then
+  patch --silent -p1 -d "$WORK/webkitgtk-$VERSION" < "$PATCH"
+elif ! patch --dry-run --silent --reverse -p1 -d "$WORK/webkitgtk-$VERSION" < "$PATCH"; then
+  echo "ERROR: could not apply $PATCH" >&2
+  exit 1
 fi
 
 cmake -S "$WORK/webkitgtk-$VERSION" -B "$WORK/build" -G Ninja \

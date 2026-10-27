@@ -21,6 +21,7 @@ CACHE="$HOME/.cache/tauri"
 WORK="$ROOT/src-tauri/target/appimage"
 APPDIR="$WORK/AppDir"
 BIN="$ROOT/src-tauri/target/release/msteams-tauri"
+SMOKE_BIN="$ROOT/src-tauri/target/release/examples/webrtc-smoke"
 ICON_SRC="$ROOT/src-tauri/icons/128x128.png"
 OUT_NAME="Microsoft_Teams-x86_64.AppImage"
 
@@ -60,9 +61,11 @@ GST_HELPERS="$SYSROOT/usr/lib/$ARCH/gstreamer1.0/gstreamer-1.0"
 }
 export LD_LIBRARY_PATH="$WEBKIT_PREFIX/lib:$SYSROOT/usr/lib/$ARCH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-echo "==> building release binary…"
-( cd "$ROOT/src-tauri" && cargo build --release )
-[[ -x "$BIN" ]] || { echo "ERROR: $BIN was not produced" >&2; exit 1; }
+echo "==> building release binaries…"
+( cd "$ROOT/src-tauri" && cargo build --release --bin msteams-tauri --example webrtc-smoke )
+for f in "$BIN" "$SMOKE_BIN"; do
+  [[ -x "$f" ]] || { echo "ERROR: $f was not produced" >&2; exit 1; }
+done
 
 # --- 2. preflight: linuxdeploy + plugins + AppRun must be cached -------------
 missing=0
@@ -83,6 +86,7 @@ fi
 echo "==> assembling AppDir…"
 rm -rf "$APPDIR"
 install -Dm755 "$BIN" "$APPDIR/usr/bin/msteams-tauri"
+install -Dm755 "$SMOKE_BIN" "$APPDIR/usr/libexec/msteams-webrtc-smoke"
 install -Dm755 "$APPRUN" "$APPDIR/usr/AppRun"
 
 cat > "$APPDIR/AppRun" <<'EOF'
@@ -96,6 +100,10 @@ export WEBKIT_INJECTED_BUNDLE_PATH="$APPDIR/usr/lib/webkit2gtk-4.1/injected-bund
 for hook in "$APPDIR"/apprun-hooks/*.sh; do
   [ ! -f "$hook" ] || . "$hook"
 done
+if [ "${1:-}" = "--webrtc-smoke" ]; then
+  export MSTEAMS_WEBRTC_SYNTHETIC=1
+  exec "$APPDIR/usr/libexec/msteams-webrtc-smoke"
+fi
 exec "$APPDIR/usr/AppRun" "$@"
 EOF
 chmod 755 "$APPDIR/AppRun"

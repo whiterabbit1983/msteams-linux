@@ -131,6 +131,8 @@ jobs:
             gstreamer1.0-gl \
             gstreamer1.0-pipewire \
             gstreamer1.0-pulseaudio \
+            xvfb \
+            xauth \
             pkg-config
 
       - name: Install Rust
@@ -160,7 +162,7 @@ jobs:
           path: |
             .webrtc-webkit/install
             .webrtc-webkit/build
-          key: webrtc-webkit-${{ runner.os }}-${{ hashFiles('scripts/build-webrtc-webkit.sh') }}
+          key: webrtc-webkit-${{ runner.os }}-${{ hashFiles('scripts/build-webrtc-webkit.sh', 'scripts/webkitgtk-relocatable.patch') }}
 
       - name: Populate AppImage tooling
         run: npx tauri build --bundles appimage
@@ -169,6 +171,11 @@ jobs:
         run: |
           ./scripts/build-webrtc-webkit.sh
           ./scripts/build-appimage.sh
+
+      - name: Test the packaged WebRTC runtime
+        run: |
+          timeout 90 xvfb-run -a ./Microsoft_Teams-x86_64.AppImage \
+            --appimage-extract-and-run --webrtc-smoke
 
       - name: Collect the artifact
         run: |

@@ -167,8 +167,8 @@ sudo apt install gstreamer1.0-plugins-bad gstreamer1.0-plugins-good \
 
 To verify the runtime without calling a Teams contact, run the WebRTC smoke
 example. It opens the camera and microphone, negotiates two local peer
-connections, and requires ICE plus inbound audio/video RTP before passing. No
-recording is saved and no media leaves the machine.
+connections, and requires ICE, inbound audio/video RTP and successful playback
+before passing. No recording is saved and no media leaves the machine.
 
 ```bash
 ./scripts/build.sh --run --example webrtc-smoke
@@ -178,7 +178,12 @@ recording is saved and no media leaves the machine.
 
 ```bash
 ./scripts/build-appimage.sh   # produces Microsoft_Teams-x86_64.AppImage
+./Microsoft_Teams-x86_64.AppImage --webrtc-smoke  # synthetic-media runtime check
 ```
+
+The packaged smoke check uses generated audio/video instead of hardware devices,
+but exercises the same real WebRTC, ICE, codecs and decoders. The release
+workflow runs it in a virtual display before publishing an AppImage.
 
 This is a hand-driven packaging run because the upstream `tauri build
 --bundles appimage` conflicts with the local sysroot (its gtk plugin asks

@@ -15,7 +15,30 @@ const TEST: &str = r#"
     if (!videoCodecs.some(codec => codec.mimeType.toLowerCase() === 'video/h264')) {
       throw new Error('H.264 unavailable: ' + JSON.stringify(videoCodecs));
     }
-    stream = await navigator.mediaDevices.getUserMedia({audio: true, video: true});
+    if (new URLSearchParams(location.search).has('synthetic')) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 160;
+      canvas.height = 120;
+      document.body.appendChild(canvas);
+      const context = canvas.getContext('2d');
+      let frame = 0;
+      setInterval(() => {
+        context.fillStyle = frame++ % 2 ? '#146eb4' : '#d83b01';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+      }, 50);
+      const audio = new AudioContext();
+      await audio.resume();
+      const oscillator = audio.createOscillator();
+      const destination = audio.createMediaStreamDestination();
+      oscillator.connect(destination);
+      oscillator.start();
+      stream = new MediaStream([
+        ...canvas.captureStream(10).getVideoTracks(),
+        ...destination.stream.getAudioTracks()
+      ]);
+    } else {
+      stream = await navigator.mediaDevices.getUserMedia({audio: true, video: true});
+    }
     first = new RTCPeerConnection();
     second = new RTCPeerConnection();
     for (const track of stream.getTracks()) first.addTrack(track, stream);
@@ -95,6 +118,7 @@ fn main() {
         settings.set_enable_webrtc(true);
         settings.set_enable_media_stream(true);
         settings.set_enable_media_capabilities(true);
+        settings.set_media_playback_requires_user_gesture(false);
         settings.set_enable_write_console_messages_to_stdout(true);
     }
     view.connect_permission_request(|_, request| {
@@ -128,9 +152,11 @@ fn main() {
         eprintln!("WebRTC smoke test timed out");
         std::process::exit(1);
     });
-    view.load_html(
-        "<title>WebRTC smoke test</title>",
-        Some("http://localhost/"),
-    );
+    let origin = if std::env::var_os("MSTEAMS_WEBRTC_SYNTHETIC").is_some() {
+        "http://localhost/?synthetic"
+    } else {
+        "http://localhost/"
+    };
+    view.load_html("<title>WebRTC smoke test</title>", Some(origin));
     gtk::main();
 }
