@@ -6,7 +6,8 @@ set -euo pipefail
 modules=(
   glib-2.0 gio-2.0 gio-unix-2.0 gobject-2.0 gthread-2.0 gmodule-2.0
   cairo libgcrypt gpg-error libtasn1 harfbuzz harfbuzz-icu
-  icu-uc icu-i18n icu-data libjpeg epoxy libxml-2.0 libpng sqlite3 zlib
+  # ICU Data has no separate .pc file; CMake's FindICU checks that library.
+  icu-uc icu-i18n libjpeg epoxy libxml-2.0 libpng sqlite3 zlib
   libwebp libwebpdemux gtk+-3.0 libsoup-3.0 fontconfig freetype2
   libxslt libsecret-1 libdrm gbm enchant-2 x11 xt
   wayland-client wayland-egl wayland-protocols lcms2 egl gl glesv2

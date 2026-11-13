@@ -77,6 +77,14 @@ class WebRTCDependencyTests(unittest.TestCase):
         self.assertIn("<openssl/ssl.h>", source)
         self.assertIn("dependencies: OK", result.stdout)
 
+    def test_icu_uses_existing_pkg_config_modules(self):
+        result, _, _, _ = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--cflags --libs icu-uc", result.stderr)
+        self.assertIn("--cflags --libs icu-i18n", result.stderr)
+        # Ubuntu's libicu-dev has no icu-data.pc; FindICU checks libicudata.
+        self.assertNotIn("icu-data", result.stderr)
+
 
 class DependencyInstallTests(unittest.TestCase):
     def test_apt_install_resolves_the_shared_manifest(self):
