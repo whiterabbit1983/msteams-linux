@@ -9,66 +9,58 @@ ARCH="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || gcc -print-multiar
 VERSION=2.48.0
 SHA256=94904a55cf12d44a4e36ceadafff02d46da73d76be9b4769f34cbfdf0eebf88e
 JOBS="${JOBS:-2}"
-
-"$ROOT/scripts/setup-sysroot.sh"
-
-mkdir -p "$SYSROOT/.debs" "$WORK"
-cd "$SYSROOT/.debs"
-{
-  apt-cache depends --recurse --no-recommends --no-suggests \
-    --no-conflicts --no-breaks --no-replaces --no-enhances \
-    cmake ninja-build ruby ruby-dev bison flex gperf unifdef gettext \
-    libglib2.0-bin libglib2.0-dev-bin 2>/dev/null \
-    | grep -E '^[a-zA-Z0-9]' | grep -v ':'
-  # apt-get download does not resolve dependencies. Include the complete dev
-  # closure for GST core/base: their .pc files also require libunwind, libdw,
-  # libelf and orc-0.4. CMake can otherwise find GST but lose its include flags.
-  apt-cache depends --recurse --no-recommends --no-suggests \
-    --no-conflicts --no-breaks --no-replaces --no-enhances \
-    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev 2>/dev/null \
-    | grep -E '^[a-zA-Z0-9]' | grep -v ':' | grep -E -- '-dev$'
-  printf '%s\n' \
-    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-    libgstreamer-plugins-bad1.0-dev \
-    libgcrypt20-dev libgpg-error-dev \
-    libharfbuzz-dev libdrm-dev libfontconfig-dev libfreetype-dev libicu-dev \
-    liblcms2-dev libxslt1-dev libxml2-dev libsqlite3-dev libgudev-1.0-dev \
-    libjpeg-dev libopenjp2-7-dev libpng-dev libtasn1-6-dev libwebp-dev \
-    libxt-dev libenchant-2-dev libsecret-1-dev \
-    libegl-dev libgl-dev libgles-dev libgbm-dev libseccomp-dev wayland-protocols \
-    libssl-dev \
-    gstreamer1.0-plugins-bad \
-    gstreamer1.0-plugins-good \
-    gstreamer1.0-nice \
-    gstreamer1.0-alsa \
-    gstreamer1.0-gl \
-    gstreamer1.0-pipewire \
-    gstreamer1.0-pulseaudio
-} | sort -u > "$WORK/build-packages.txt"
-
-while read -r pkg; do
-  [[ -z "$pkg" ]] && continue
-  apt-get download "$pkg" >/dev/null 2>&1 || {
-    echo "ERROR: could not download $pkg" >&2
-    exit 1
-  }
-done < "$WORK/build-packages.txt"
-
-for deb in ./*.deb; do
-  dpkg-deb -x "$deb" "$SYSROOT"
+USE_SYSROOT=1
+CONFIGURE_ONLY=0
+for arg in "$@"; do
+  case "$arg" in
+    --system-deps) USE_SYSROOT=0 ;;
+    --configure-only) CONFIGURE_ONLY=1 ;;
+    *) echo "Usage: $0 [--system-deps] [--configure-only]" >&2; exit 2 ;;
+  esac
 done
 
-export PATH="$SYSROOT/usr/bin:$HOME/.cargo/bin:$PATH"
-export PKG_CONFIG_SYSROOT_DIR="$SYSROOT"
-export PKG_CONFIG_PATH="$SYSROOT/usr/lib/$ARCH/pkgconfig:$SYSROOT/usr/share/pkgconfig"
-export PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1
-export PKG_CONFIG_ALLOW_SYSTEM_LIBS=1
-export LIBRARY_PATH="$SYSROOT/usr/lib/$ARCH:/usr/lib/$ARCH"
-export LD_LIBRARY_PATH="$SYSROOT/usr/lib/$ARCH:$SYSROOT/lib/$ARCH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-export RUBYLIB="$SYSROOT/usr/lib/ruby/vendor_ruby/3.2.0:$SYSROOT/usr/lib/ruby/vendor_ruby:$SYSROOT/usr/lib/ruby/3.2.0:$SYSROOT/usr/lib/$ARCH/ruby/3.2.0${RUBYLIB:+:$RUBYLIB}"
+mkdir -p "$WORK"
+if (( USE_SYSROOT )); then
+  "$ROOT/scripts/setup-sysroot.sh"
+  # shellcheck source=scripts/webrtc-packages.sh
+  source "$ROOT/scripts/webrtc-packages.sh"
+  mkdir -p "$SYSROOT/.debs"
+  cd "$SYSROOT/.debs"
+  {
+    # Resolve all roots, not only GST core/base. Include runtime packages too:
+    # extracting dev packages without their runtime .so targets is not enough.
+    printf '%s\n' "${WEBKIT_BUILD_TOOLS[@]}" "${WEBKIT_DEV_PACKAGES[@]}" "${WEBKIT_MEDIA_PACKAGES[@]}"
+    apt-cache depends --recurse --no-recommends --no-suggests \
+      --no-conflicts --no-breaks --no-replaces --no-enhances \
+      "${WEBKIT_BUILD_TOOLS[@]}" "${WEBKIT_DEV_PACKAGES[@]}" "${WEBKIT_MEDIA_PACKAGES[@]}" \
+      | grep -E '^[a-zA-Z0-9]' | grep -v ':'
+  } | sort -u > "$WORK/build-packages.txt"
 
-# CMake's GStreamer finder can find the libraries even when pkg-config fails.
-# In that case it silently drops the include flags and fails much later in C++.
+  while read -r pkg; do
+    [[ -z "$pkg" ]] && continue
+    apt-get download "$pkg" >/dev/null 2>&1 || {
+      echo "ERROR: could not download $pkg" >&2
+      exit 1
+    }
+  done < "$WORK/build-packages.txt"
+  for deb in ./*.deb; do
+    dpkg-deb -x "$deb" "$SYSROOT"
+  done
+
+  export PATH="$SYSROOT/usr/bin:$HOME/.cargo/bin:$PATH"
+  export PKG_CONFIG_SYSROOT_DIR="$SYSROOT"
+  export PKG_CONFIG_PATH="$SYSROOT/usr/lib/$ARCH/pkgconfig:$SYSROOT/usr/share/pkgconfig"
+  export PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1
+  export PKG_CONFIG_ALLOW_SYSTEM_LIBS=1
+  export LIBRARY_PATH="$SYSROOT/usr/lib/$ARCH:/usr/lib/$ARCH"
+  export LD_LIBRARY_PATH="$SYSROOT/usr/lib/$ARCH:$SYSROOT/lib/$ARCH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export RUBYLIB="$SYSROOT/usr/lib/ruby/vendor_ruby/3.2.0:$SYSROOT/usr/lib/ruby/vendor_ruby:$SYSROOT/usr/lib/ruby/3.2.0:$SYSROOT/usr/lib/$ARCH/ruby/3.2.0${RUBYLIB:+:$RUBYLIB}"
+else
+  echo "==> using native system dependencies (no rootless sysroot)"
+fi
+
+# CMake can find GST libraries even when pkg-config fails and loses the cflags.
+# Check every required pkg-config module, then compile the GST/WebRTC headers.
 bash "$ROOT/scripts/check-webrtc-deps.sh"
 
 TARBALL="$WORK/webkitgtk-$VERSION.tar.xz"
@@ -118,6 +110,10 @@ cmake -S "$WORK/webkitgtk-$VERSION" -B "$WORK/build" -G Ninja \
   -DUSE_LIBHYPHEN=OFF \
   -DUSE_SYSPROF_CAPTURE=OFF
 
+if (( CONFIGURE_ONLY )); then
+  echo "WebKitGTK dependency validation and CMake configuration: OK"
+  exit 0
+fi
 cmake --build "$WORK/build" --parallel "$JOBS"
 cmake --install "$WORK/build"
 

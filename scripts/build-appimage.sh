@@ -52,14 +52,16 @@ for f in "$WEBKIT_PREFIX/lib/libwebkit2gtk-4.1.so" \
     exit 1
   }
 done
-GST_PLUGINS="$SYSROOT/usr/lib/$ARCH/gstreamer-1.0"
-GST_HELPERS="$SYSROOT/usr/lib/$ARCH/gstreamer1.0/gstreamer-1.0"
-[[ -f "$GST_PLUGINS/libgstwebrtc.so" && -x "$GST_HELPERS/gst-plugin-scanner" ]] || {
-  echo "ERROR: local GStreamer WebRTC plugins/helpers are missing" >&2
-  echo "Run ./scripts/build-webrtc-webkit.sh first." >&2
+GST_ROOT=/usr
+[[ ! -d "$SYSROOT/usr/lib/$ARCH/pkgconfig" ]] || GST_ROOT="$SYSROOT/usr"
+GST_PLUGINS="$GST_ROOT/lib/$ARCH/gstreamer-1.0"
+GST_HELPERS="$GST_ROOT/lib/$ARCH/gstreamer1.0/gstreamer-1.0"
+[[ -f "$GST_PLUGINS/libgstwebrtc.so" && -f "$GST_PLUGINS/libgstnice.so" && -x "$GST_HELPERS/gst-plugin-scanner" ]] || {
+  echo "ERROR: GStreamer WebRTC/ICE plugins or helpers are missing in $GST_ROOT" >&2
+  echo "Install the media packages with scripts/install-webrtc-deps.sh." >&2
   exit 1
 }
-export LD_LIBRARY_PATH="$WEBKIT_PREFIX/lib:$SYSROOT/usr/lib/$ARCH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="$WEBKIT_PREFIX/lib:$GST_ROOT/lib/$ARCH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 echo "==> building release binaries…"
 ( cd "$ROOT/src-tauri" && cargo build --release --bin msteams-tauri --example webrtc-smoke )

@@ -77,7 +77,9 @@ The fix has three parts:
 │   ├── setup-sysroot.sh      # root-less build deps (fallback, see below)
 │   ├── build.sh              # build/run helper that wires up the sysroot
 │   ├── build-webrtc-webkit.sh # local WebKitGTK with WebRTC and media support
-│   ├── check-webrtc-deps.sh  # fail early on missing GStreamer headers/metadata
+│   ├── check-webrtc-deps.sh  # validate the complete GTK/media pkg-config stack
+│   ├── webrtc-packages.sh    # shared WebKitGTK dependency manifest
+│   ├── install-webrtc-deps.sh # install the full APT dependency graph (CI)
 │   └── build-appimage.sh     # Linux AppImage packaging for the sysroot setup
 └── src-tauri/
     ├── Cargo.toml
@@ -148,19 +150,34 @@ typeof RTCPeerConnection   // "undefined" on stock Ubuntu WebKitGTK
 The wrapper cannot add WebRTC to an already installed WebKitGTK, so the project
 builds a compatible local copy instead of hiding the calling error:
 
+On Linux with sudo (also used by GitHub Actions):
+
 ```bash
-./scripts/build-webrtc-webkit.sh  # once; a large local build, no root required
+sudo apt-get update
+sudo bash scripts/install-webrtc-deps.sh
+./scripts/build-webrtc-webkit.sh --system-deps
 ./scripts/build.sh --run
 ```
 
+The shared manifest `scripts/webrtc-packages.sh` lists the build tools, development
+packages and media plugins. `apt-get install` resolves **all** their transitive
+build/runtime dependencies, rather than downloading individual dev packages.
+This includes libunwind, libdw, libelf, ORC and the libnice ICE plugin.
+
+For a locked-down Linux machine without sudo, `build-webrtc-webkit.sh` without
+`--system-deps` instead downloads/extracts the manifest's full dependency graph
+into the local sysroot. This fallback needs more download space.
+
 The build enables `ENABLE_MEDIA_STREAM`, `ENABLE_WEB_RTC` and the GStreamer
-WebRTC backend. It resolves the transitive development dependencies of GStreamer
-core/base (including `libunwind-dev`, `libdw-dev`, `libelf-dev` and
-`liborc-0.4-dev`) through APT, and includes the libnice ICE plugin. Before
-downloading or compiling WebKitGTK, it validates pkg-config metadata and compiles
-a small header-only check. This catches missing GStreamer include flags before
-a long build, rather than failing later with `gst/gst.h: No such file or directory`. `build.sh` automatically points both the app and WebKit's helper
-processes at this local copy. The AppImage build packages the same copy so calls
+WebRTC backend. Before compiling WebKitGTK, it checks the GTK/media pkg-config
+modules together, compiles a small GStreamer/WebRTC header check, and configures
+CMake to validate dependency versions and platform features. Use
+`--configure-only` to stop after those checks. CI runs configuration in a separate
+step, before the expensive compilation. This catches missing include flags early
+instead of failing later with `gst/gst.h: No such file or directory`.
+
+`build.sh` automatically points both the app and WebKit's helper processes at
+this local copy. The AppImage build packages the same copy so calls
 also work without replacing the system's WebKitGTK. Camera and microphone access
 must be allowed by the desktop environment. For running from source on
 Debian/Ubuntu/Mint, install the media runtime plugins:
@@ -218,15 +235,21 @@ AppRun cache is missing (it may fail at the gtk step; that populates the cache).
 | **Actions → Run workflow** | same, published as a prerelease; fill the optional `tag` input to build *and* check out that tag |
 | pull request touching `src-tauri/**`, `dist/**`, `scripts/**`, `package*.json` | checks only, nothing is published |
 
-The release job runs the same `build-webrtc-webkit.sh` and `build-appimage.sh`
-scripts as a local build. The resulting file is renamed to
+The release job installs the shared dependency manifest through APT, validates
+the full GTK/media stack, then configures WebKitGTK with
+`build-webrtc-webkit.sh --system-deps --configure-only` before compiling it.
+`build-appimage.sh` packages the local WebKitGTK and the system media plugins. The resulting file is renamed to
 `Microsoft_Teams-<version>-x86_64.AppImage` and uploaded as a release asset.
 
 Rust, npm, WebKitGTK and the `~/.cache/tauri` AppImage tooling are cached between
 runs. WebKitGTK, AppImage packaging and the packaged WebRTC check are separate
 steps. The `build-diagnostics` artifact retains their logs for 7 days, including
 when a build fails. The check job also tests the early dependency gate.
-`contents: write` is granted to the `publish` job only.
+The JavaScript-based Actions use the Node.js 24 runner runtime; the app's
+Node.js toolchain is configured separately by `setup-node`.
+`contents: write` is granted to the `publish` job only. Release publication fails
+if the expected AppImage is missing, and generated release tags point to the
+workflow's source commit.
 
 Publishing needs no extra setup beyond the default `GITHUB_TOKEN`, since the
 workflow pushes to the same repository it is triggered from.

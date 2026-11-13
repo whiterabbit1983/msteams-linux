@@ -17,6 +17,7 @@ class WebRTCDependencyTests(unittest.TestCase):
             pkg_config = root / "pkg-config"
             pkg_config.write_text(
                 '#!/bin/sh\n'
+                'printf "checked: %s\\n" "$*" >&2\n'
                 'case "$*" in\n'
                 f'  *--cflags*) echo "-I/test/include"; exit {cflags_status} ;;\n'
                 f'  *--libs*) exit {libs_status} ;;\n'
@@ -49,6 +50,10 @@ class WebRTCDependencyTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(called)
         self.assertIn("incomplete WebRTC development dependencies", result.stderr)
+        # Do not stop on the first missing package: report the whole stack.
+        self.assertIn("--cflags --libs glib-2.0", result.stderr)
+        self.assertIn("--cflags --libs gstreamer-webrtc-1.0", result.stderr)
+        self.assertIn("--cflags --libs openssl", result.stderr)
 
     def test_broken_library_metadata_stops_before_compiler(self):
         result, called, _, _ = self.run_gate(libs_status=1)
@@ -71,6 +76,34 @@ class WebRTCDependencyTests(unittest.TestCase):
         self.assertIn("<gst/webrtc/webrtc.h>", source)
         self.assertIn("<openssl/ssl.h>", source)
         self.assertIn("dependencies: OK", result.stdout)
+
+
+class DependencyInstallTests(unittest.TestCase):
+    def test_apt_install_resolves_the_shared_manifest(self):
+        script = SCRIPT.parent / "install-webrtc-deps.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            apt = root / "apt-get"
+            apt.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+            apt.chmod(0o755)
+            result = subprocess.run(
+                ["bash", str(script)],
+                env={**os.environ, "PATH": f"{root}:{os.environ['PATH']}"},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = result.stdout.splitlines()
+            self.assertEqual(args[:3], ["install", "-y", "--no-install-recommends"])
+            for package in [
+                "cmake", "libgtk-3-dev", "libgstreamer1.0-dev",
+                "libgstreamer-plugins-base1.0-dev", "libgstreamer-plugins-bad1.0-dev",
+                "libgcrypt20-dev", "libssl-dev", "gstreamer1.0-nice",
+                "gstreamer1.0-pulseaudio",
+            ]:
+                self.assertIn(package, args)
+            self.assertNotIn("download", args)
 
 
 if __name__ == "__main__":

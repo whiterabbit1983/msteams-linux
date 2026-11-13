@@ -41,7 +41,7 @@ jobs:
     name: Check
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
       - name: Install system dependencies
         run: |
@@ -69,7 +69,7 @@ jobs:
           workspaces: src-tauri
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -100,7 +100,7 @@ jobs:
     needs: check
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
         with:
           # A manual run may ask for a tag other than the checked-out ref, so all
           # tags have to be available for the checkout below.
@@ -150,7 +150,7 @@ jobs:
           workspaces: src-tauri
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -158,25 +158,38 @@ jobs:
       - run: npm ci --no-audit --no-fund
 
       - name: Cache AppImage tooling
-        uses: actions/cache@v4
+        uses: actions/cache@v6.1.0
         with:
           path: ~/.cache/tauri
           key: tauri-appimage-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
 
       - name: Cache WebRTC-enabled WebKitGTK
-        uses: actions/cache@v4
+        uses: actions/cache@v6.1.0
         with:
           path: |
             .webrtc-webkit/install
             .webrtc-webkit/build
-          key: webrtc-webkit-${{ runner.os }}-${{ hashFiles('scripts/build-webrtc-webkit.sh', 'scripts/check-webrtc-deps.sh', 'scripts/webkitgtk-relocatable.patch') }}
+          key: webrtc-webkit-${{ runner.os }}-${{ hashFiles('scripts/build-webrtc-webkit.sh', 'scripts/check-webrtc-deps.sh', 'scripts/webrtc-packages.sh', 'scripts/install-webrtc-deps.sh', 'scripts/webkitgtk-relocatable.patch') }}
+
+      - name: Install and validate all WebKitGTK dependencies
+        shell: bash
+        run: |
+          sudo bash scripts/install-webrtc-deps.sh 2>&1 | tee dependencies-build.log
+          bash scripts/check-webrtc-deps.sh
+
+      - name: Configure WebKitGTK and validate dependency versions
+        shell: bash
+        run: |
+          ./scripts/build-webrtc-webkit.sh --system-deps --configure-only 2>&1 | tee configure-build.log
 
       - name: Populate AppImage tooling
         run: npx tauri build --bundles appimage
 
       - name: Build WebRTC-enabled WebKitGTK
         shell: bash
-        run: ./scripts/build-webrtc-webkit.sh 2>&1 | tee webkit-build.log
+        run: |
+          cmake --build .webrtc-webkit/build --parallel 2 2>&1 | tee webkit-build.log
+          cmake --install .webrtc-webkit/build 2>&1 | tee -a webkit-build.log
 
       - name: Build the AppImage
         shell: bash
@@ -190,7 +203,7 @@ jobs:
 
       - name: Upload build diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: build-diagnostics
           path: |
@@ -208,7 +221,7 @@ jobs:
           mv Microsoft_Teams-x86_64.AppImage "dist/Microsoft_Teams-${version}-x86_64.AppImage"
           ls -la dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: appimage
           path: dist/*.AppImage
@@ -224,7 +237,7 @@ jobs:
       contents: write
     steps:
       - name: Download the AppImage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.2
         with:
           name: appimage
           path: dist
@@ -241,10 +254,12 @@ jobs:
           fi
 
       - name: Publish to GitHub Releases
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3.0.4
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: ${{ steps.tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          fail_on_unmatched_files: true
           # A manual run without an explicit tag is just a build, not a release.
           prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.tag == '' }}
           draft: false
