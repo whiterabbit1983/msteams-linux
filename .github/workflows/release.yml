@@ -212,6 +212,10 @@ jobs:
         shell: bash
         run: ./scripts/build-appimage.sh 2>&1 | tee appimage-build.log
 
+      - name: Test packaged application startup (not WebRTC)
+        shell: bash
+        run: bash scripts/check-appimage-startup.sh ./Microsoft_Teams-x86_64.AppImage
+
       - name: Test the packaged WebRTC runtime (optional)
         id: webrtc-smoke
         if: github.event_name == 'workflow_dispatch' && inputs.webrtc_smoke
@@ -244,6 +248,7 @@ jobs:
           path: |
             *-build.log
             webrtc-smoke.log
+            startup-smoke.log
             pulseaudio.log
             .webrtc-webkit/build/CMakeFiles/CMakeConfigureLog.yaml
           include-hidden-files: true

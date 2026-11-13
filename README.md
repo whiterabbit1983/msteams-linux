@@ -224,8 +224,10 @@ pkg-config, which returns sysroot-prefixed paths, for the runtime data
 directories). The script instead calls linuxdeploy with a clean environment and
 ships the pieces the webkit gtk plugin does not handle itself:
 
-- `~/.cache/tauri/AppRun-x86_64` — the Tauri AppRun, wrapped by a small launcher
-  that points WebKit at paths relative to the mounted AppImage,
+- `scripts/appimage-apprun.sh` — a launcher that sets WebKit paths relative to
+  the mounted AppImage and directly executes `usr/bin/msteams-tauri`. It does
+  not relocate Tauri's generic AppRun into `usr/`, which makes that helper look
+  for `.desktop` files in the wrong directory,
 - the local WebKitGTK/JavaScriptCore libraries, helper processes and
   injected-bundle, with no dependency on the distro WebKit build,
 - the GStreamer runtime plugins, including WebRTC and audio/video support,
@@ -250,6 +252,11 @@ checks and AppImage packaging to succeed. The app job installs the shared APT
 dependency manifest and validates the complete GTK/media stack.
 `build-appimage.sh` packages the local WebKitGTK and the system media plugins.
 The result is uploaded as `Microsoft_Teams-<version>-x86_64.AppImage`.
+Before publishing, CI launches the **actual app** from an unrelated empty working
+directory under D-Bus/Xvfb. The gate requires a Tauri/GTK main-window startup
+marker and a process that stays running for 20 seconds. This packaging/startup
+check is separate from the disabled-by-default WebRTC test and does not verify
+Teams sign-in or calls.
 
 ### Reusable WebKitGTK binaries
 

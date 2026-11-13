@@ -26,7 +26,6 @@ ICON_SRC="$ROOT/src-tauri/icons/128x128.png"
 OUT_NAME="Microsoft_Teams-x86_64.AppImage"
 
 LINUXDEPLOY="${LINUXDEPLOY:-$CACHE/linuxdeploy-07333c6-x86_64.AppImage}"
-APPRUN="$CACHE/AppRun-x86_64"
 
 export PATH="$HOME/.cargo/bin:$PATH"
 
@@ -69,18 +68,17 @@ for f in "$BIN" "$SMOKE_BIN"; do
   [[ -x "$f" ]] || { echo "ERROR: $f was not produced" >&2; exit 1; }
 done
 
-# --- 2. preflight: linuxdeploy + plugins + AppRun must be cached -------------
+# --- 2. preflight: linuxdeploy + plugins must be cached ---------------------
 missing=0
 for f in "$LINUXDEPLOY" \
          "$CACHE/linuxdeploy-plugin-gtk.sh" \
          "$CACHE/linuxdeploy-plugin-gstreamer.sh" \
-         "$CACHE/linuxdeploy-plugin-appimage.AppImage" \
-         "$APPRUN"; do
+         "$CACHE/linuxdeploy-plugin-appimage.AppImage"; do
   [[ -e "$f" ]] || { echo "ERROR: missing $f" >&2; missing=1; }
 done
 if [[ "$missing" -ne 0 ]]; then
   echo "Run 'npm run tauri build -- --bundles appimage' once to populate" >&2
-  echo "the linuxdeploy/AppRun cache (it is allowed to fail at the gtk step)." >&2
+  echo "the linuxdeploy cache (it is allowed to fail at the gtk step)." >&2
   exit 1
 fi
 
@@ -89,26 +87,7 @@ echo "==> assembling AppDir…"
 rm -rf "$APPDIR"
 install -Dm755 "$BIN" "$APPDIR/usr/bin/msteams-tauri"
 install -Dm755 "$SMOKE_BIN" "$APPDIR/usr/libexec/msteams-webrtc-smoke"
-install -Dm755 "$APPRUN" "$APPDIR/usr/AppRun"
-
-cat > "$APPDIR/AppRun" <<'EOF'
-#!/bin/sh
-set -eu
-APPDIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-export APPDIR
-export LD_LIBRARY_PATH="$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-export WEBKIT_EXEC_PATH="$APPDIR/usr/libexec/webkit2gtk-4.1"
-export WEBKIT_INJECTED_BUNDLE_PATH="$APPDIR/usr/lib/webkit2gtk-4.1/injected-bundle"
-for hook in "$APPDIR"/apprun-hooks/*.sh; do
-  [ ! -f "$hook" ] || . "$hook"
-done
-if [ "${1:-}" = "--webrtc-smoke" ]; then
-  export MSTEAMS_WEBRTC_SYNTHETIC=1
-  exec "$APPDIR/usr/libexec/msteams-webrtc-smoke"
-fi
-exec "$APPDIR/usr/AppRun" "$@"
-EOF
-chmod 755 "$APPDIR/AppRun"
+install -Dm755 "$ROOT/scripts/appimage-apprun.sh" "$APPDIR/AppRun"
 
 mkdir -p "$APPDIR/usr/share/applications" \
          "$APPDIR/usr/share/icons/hicolor/128x128/apps"

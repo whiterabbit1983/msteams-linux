@@ -646,6 +646,11 @@ pub fn run() {
 
             let url = Url::parse(TEAMS_URL).expect("TEAMS_URL is a valid URL");
             let main = create_window(app.handle(), "main", url, WindowKind::Main, data_dir)?;
+            if std::env::var_os("MSTEAMS_STARTUP_CHECK").is_some() {
+                // The packaging check must reach the actual Tauri/GTK window,
+                // not just keep an AppImage launcher process alive.
+                println!("MSTEAMS_STARTUP_OK");
+            }
 
             // Teams closes its sign-in popups from JavaScript, which only
             // destroys their web view; drop the leftover windows once the user is

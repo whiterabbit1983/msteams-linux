@@ -132,7 +132,8 @@ jobs:
           rules = Path('.webrtc-webkit/build/CMakeFiles/rules.ninja').read_text()
           assert re.search(r'pool link_pool_jobs\s+depth = 1\b', rules), 'Missing single-link Ninja pool'
           assert re.search(r'pool compile_pool_jobs\s+depth = ' + jobs + r'\b', rules), 'Missing memory-aware compile pool'
-          assert '/usr/bin/ccache' in rules, 'Compiler cache launcher was not enabled'
+          graph = rules + Path('.webrtc-webkit/build/build.ninja').read_text()
+          assert '/usr/bin/ccache' in graph, 'Compiler cache launcher was not enabled'
           PY
           echo "WebKit configured compile jobs: $jobs; link jobs: 1; ccache: enabled" >> "$GITHUB_STEP_SUMMARY"
 
@@ -192,6 +193,8 @@ jobs:
           path: |
             *-build.log
             .webrtc-webkit/build/CMakeCache.txt
+            .webrtc-webkit/build/build.ninja
+            .webrtc-webkit/build/CMakeFiles/rules.ninja
             .webrtc-webkit/build/CMakeFiles/CMakeConfigureLog.yaml
           include-hidden-files: true
           if-no-files-found: ignore
