@@ -205,10 +205,15 @@ before passing. No recording is saved and no media leaves the machine.
 ```
 
 The packaged smoke check uses generated audio/video instead of hardware devices,
-but exercises the same real WebRTC, ICE, codecs and decoders. The release
-workflow runs it in a virtual display before publishing an AppImage. CI starts
-PulseAudio with a virtual null sink so WebAudio can run without a physical sound
-device. The check waits for positive inbound audio/video RTP counters **and**
+but exercises the same real WebRTC, ICE, codecs and decoders. It is **disabled by
+default** for release publication at the maintainer's request. Enable the
+`webrtc_smoke` checkbox in a manual workflow run to execute it; if enabled, a
+failure still blocks that run's publication. Release notes explicitly state
+whether the check passed or was skipped. A successful build without this check
+is not evidence that audio/video calls work.
+
+When enabled, CI runs the check in a virtual display and starts PulseAudio with
+a virtual null sink so WebAudio can run without a physical sound device. The check waits for positive inbound audio/video RTP counters **and**
 advancing decoded playback, rather than sampling stats once after 1.5 seconds.
 Failure logs include the sender/receiver counters, track states and audio context
 state; a failed candidate is kept as `unverified-appimage`, not published.

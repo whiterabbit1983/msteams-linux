@@ -22,6 +22,11 @@ on:
         description: "Tag to publish under (defaults to a build-<run> prerelease tag)"
         required: false
         type: string
+      webrtc_smoke:
+        description: "Run the optional packaged WebRTC smoke test (may block publication)"
+        required: false
+        type: boolean
+        default: false
   pull_request:
     paths:
       - "src-tauri/**"
@@ -100,6 +105,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: check
     runs-on: ubuntu-24.04
+    outputs:
+      webrtc_smoke_status: ${{ steps.webrtc-smoke.outcome }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -214,7 +221,9 @@ jobs:
         shell: bash
         run: ./scripts/build-appimage.sh 2>&1 | tee appimage-build.log
 
-      - name: Test the packaged WebRTC runtime
+      - name: Test the packaged WebRTC runtime (optional)
+        id: webrtc-smoke
+        if: github.event_name == 'workflow_dispatch' && inputs.webrtc_smoke
         shell: bash
         run: |
           # A hosted runner has no sound device or running audio daemon. Give
@@ -309,4 +318,6 @@ jobs:
           prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.tag == '' }}
           draft: false
           generate_release_notes: true
+          body: |
+            ${{ needs.build-appimage.outputs.webrtc_smoke_status == 'success' && 'The optional WebRTC smoke test passed in Linux CI. Real Teams calls were not tested.' || 'WebRTC smoke testing was skipped for this release. Audio/video calling has not been verified.' }}
           files: dist/*.AppImage
