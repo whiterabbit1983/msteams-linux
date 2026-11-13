@@ -245,23 +245,46 @@ AppRun cache is missing (it may fail at the gtk step; that populates the cache).
 | **Actions → Run workflow** | same, published as a prerelease; fill the optional `tag` input to build *and* check out that tag |
 | pull request touching `src-tauri/**`, `dist/**`, `scripts/**`, `package*.json` | checks only, nothing is published |
 
-The release job installs the shared dependency manifest through APT, validates
-the full GTK/media stack, then configures WebKitGTK with
-`build-webrtc-webkit.sh --system-deps --configure-only` before compiling it.
-`build-appimage.sh` packages the local WebKitGTK and the system media plugins. The resulting file is renamed to
-`Microsoft_Teams-<version>-x86_64.AppImage` and uploaded as a release asset.
+Checks and dependency preparation run in parallel. Publication waits for both
+checks and AppImage packaging to succeed. The app job installs the shared APT
+dependency manifest and validates the complete GTK/media stack.
+`build-appimage.sh` packages the local WebKitGTK and the system media plugins.
+The result is uploaded as `Microsoft_Teams-<version>-x86_64.AppImage`.
 
-Rust, npm, WebKitGTK and the `~/.cache/tauri` AppImage tooling are cached between
-runs. The installed WebKitGTK and AppImage tools are saved immediately after
-their successful build, before runtime tests; a smoke-test failure does not discard
-the expensive WebKitGTK cache. A matching installed cache skips recompilation.
-WebKitGTK, AppImage packaging and the packaged WebRTC check are separate steps. The `build-diagnostics` artifact retains their logs for 7 days, including
-when a build fails. The check job also tests the early dependency gate.
-The JavaScript-based Actions use the Node.js 24 runner runtime; the app's
-Node.js toolchain is configured separately by `setup-node`.
-`contents: write` is granted to the `publish` job only. Release publication fails
-if the expected AppImage is missing, and generated release tags point to the
-workflow's source commit.
+### Reusable WebKitGTK binaries
+
+`.github/workflows/webkit.yml` produces a permanent, versioned dependency release
+containing the installed WebKitGTK as `*.tar.gz` plus a SHA256 sidecar. App builds
+download this archive instead of compiling WebKitGTK. Cache eviction no longer
+forces a multi-hour rebuild. Dependency releases are marked as prereleases and
+are separate from the downloadable Teams AppImage.
+
+`scripts/webkit-profile.json` is the shared source version, source SHA256 and
+CMake option manifest used by the builder and archive validator. The dependency
+identity includes this profile, the package manifest and the relocatable patch.
+Changing CI or build-driver plumbing alone does not invalidate it; bump
+`build_revision` for other runtime-affecting build changes. Archive installation
+checks the SHA256, embedded profile, required x86-64 ELF files and safe archive
+paths before exposing the install. Python 3.12 or newer is required.
+
+The dependency workflow automatically reuses a matching published archive or
+installed cache. A genuinely new profile builds from source, with ccache,
+CPU/cgroup/RAM-aware parallelism and a single Ninja link job. It saves compiler
+cache entries even after a compile failure and the completed install before
+archive publication. An explicit `bootstrap_cache_key` input can migrate a known
+compatible legacy install cache without recompilation; it must not point to an
+incompatible profile. The initial archive uses the same runtime options as the
+already-published `build-8` AppImage, including WebRTC.
+
+Rust workspace artifacts, npm and `~/.cache/tauri` tools are also cached. The
+redundant full Tauri build used to populate tooling now runs **only on a tooling
+cache miss**, not on every app build. The optional WebRTC check remains disabled
+by default; see the runtime-check section above. Logs are retained for 7 days,
+including on failure, and mock tests cover dependency and archive validation.
+The JavaScript-based Actions use Node.js 24; the app's Node.js toolchain is
+configured separately by `setup-node`. Repository write access is limited to
+the dependency producer and AppImage publisher. Release publication fails if
+the expected AppImage is missing.
 
 Publishing needs no extra setup beyond the default `GITHUB_TOKEN`, since the
 workflow pushes to the same repository it is triggered from.

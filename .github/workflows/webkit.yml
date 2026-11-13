@@ -1,0 +1,198 @@
+name: WebKit dependency
+
+on:
+  workflow_dispatch:
+    inputs:
+      bootstrap_cache_key:
+        description: "Optional compatible legacy install cache to publish without recompilation"
+        type: string
+        default: ""
+  workflow_call:
+    inputs:
+      ref:
+        description: "Source ref whose dependency profile must be prepared"
+        type: string
+        default: ""
+    outputs:
+      bundle_tag:
+        description: "Immutable dependency release tag"
+        value: ${{ jobs.webkit.outputs.bundle_tag }}
+
+permissions:
+  contents: read
+
+jobs:
+  webkit:
+    name: Prepare versioned WebKitGTK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: write
+    # Serialize producers. Never cancel an expensive build for a newer run.
+    concurrency:
+      group: webkit-dependency-${{ github.repository }}
+      cancel-in-progress: false
+    outputs:
+      bundle_tag: ${{ steps.identity.outputs.tag }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CCACHE_DIR: /home/runner/.cache/ccache
+      CCACHE_MAXSIZE: 2G
+      CCACHE_COMPRESS: "true"
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      BOOTSTRAP_CACHE_KEY: ${{ inputs.bootstrap_cache_key }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Resolve the dependency identity
+        id: identity
+        shell: bash
+        run: |
+          tag="$(python3 scripts/webkit-bundle.py identity)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "BUNDLE_TAG=$tag" >> "$GITHUB_ENV"
+
+      - name: Check the permanent dependency release
+        id: published
+        shell: bash
+        run: |
+          if gh release view "$BUNDLE_TAG" --json assets > "$RUNNER_TEMP/webkit-release.json" 2> "$RUNNER_TEMP/webkit-release-error"; then
+            python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          names = {asset['name'] for asset in json.loads((Path(os.environ['RUNNER_TEMP']) / 'webkit-release.json').read_text())['assets']}
+          archive = os.environ['BUNDLE_TAG'] + '.tar.gz'
+          assert {archive, archive + '.sha256'} <= names, 'Incomplete dependency release; refusing to overwrite it'
+          PY
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "WebKitGTK already published: $BUNDLE_TAG" >> "$GITHUB_STEP_SUMMARY"
+          elif grep -Eq 'release not found|HTTP 404' "$RUNNER_TEMP/webkit-release-error"; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            python3 -c 'import os,pathlib; print((pathlib.Path(os.environ["RUNNER_TEMP"])/"webkit-release-error").read_text())'
+            exit 1
+          fi
+
+      - name: Restore the installed WebKitGTK
+        if: steps.published.outputs.ready != 'true'
+        id: install-cache
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: .webrtc-webkit/install
+          key: webrtc-webkit-install-${{ runner.os }}-${{ steps.identity.outputs.tag }}
+          # Bootstrap is explicit, never an automatic cross-profile fallback.
+          restore-keys: ${{ inputs.bootstrap_cache_key }}
+
+      - name: Validate the restored install
+        if: steps.published.outputs.ready != 'true'
+        id: installed
+        run: |
+          if [ -d .webrtc-webkit/install ]; then
+            python3 scripts/webkit-bundle.py check
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install the complete build dependency graph
+        if: steps.published.outputs.ready != 'true' && (steps.installed.outputs.ready != 'true' || inputs.bootstrap_cache_key != '')
+        run: |
+          sudo apt-get update
+          sudo bash scripts/install-webrtc-deps.sh
+          sudo apt-get install -y --no-install-recommends ccache
+
+      - name: Restore the compiler cache
+        if: steps.published.outputs.ready != 'true' && (steps.installed.outputs.ready != 'true' || inputs.bootstrap_cache_key != '')
+        id: ccache
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: webkit-ccache-${{ runner.os }}-${{ runner.arch }}-${{ steps.identity.outputs.tag }}-${{ github.run_id }}
+          restore-keys: |
+            webkit-ccache-${{ runner.os }}-${{ runner.arch }}-${{ steps.identity.outputs.tag }}-
+            webkit-ccache-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Configure with memory-aware Ninja pools and ccache
+        # Explicit bootstrap also validates the new driver's real Linux CMake
+        # configuration without needlessly recompiling the completed library.
+        if: steps.published.outputs.ready != 'true' && (steps.installed.outputs.ready != 'true' || inputs.bootstrap_cache_key != '')
+        id: configure
+        shell: bash
+        run: |
+          jobs="$(python3 scripts/webkit-bundle.py jobs)"
+          echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
+          ccache --zero-stats
+          ./scripts/build-webrtc-webkit.sh --system-deps --configure-only 2>&1 | tee configure-build.log
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, subprocess
+          jobs = subprocess.check_output(['python3', 'scripts/webkit-bundle.py', 'jobs'], text=True).strip()
+          rules = Path('.webrtc-webkit/build/CMakeFiles/rules.ninja').read_text()
+          assert re.search(r'pool link_pool_jobs\s+depth = 1\b', rules), 'Missing single-link Ninja pool'
+          assert re.search(r'pool compile_pool_jobs\s+depth = ' + jobs + r'\b', rules), 'Missing memory-aware compile pool'
+          assert '/usr/bin/ccache' in rules, 'Compiler cache launcher was not enabled'
+          PY
+          echo "WebKit configured compile jobs: $jobs; link jobs: 1; ccache: enabled" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compile and install WebKitGTK
+        if: steps.configure.outcome == 'success' && steps.installed.outputs.ready != 'true'
+        id: compile
+        shell: bash
+        run: |
+          cmake --build .webrtc-webkit/build --parallel '${{ steps.configure.outputs.jobs }}' 2>&1 | tee webkit-build.log
+          cmake --install .webrtc-webkit/build 2>&1 | tee -a webkit-build.log
+          python3 scripts/webkit-bundle.py check
+
+      - name: Save the compiler cache even after a compile failure
+        if: always() && steps.configure.outcome == 'success'
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ${{ steps.ccache.outputs.cache-primary-key }}
+
+      - name: Report compiler cache statistics
+        if: always() && steps.configure.outcome == 'success'
+        run: ccache --show-stats | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the installed WebKitGTK before publication
+        if: steps.published.outputs.ready != 'true' && steps.install-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: .webrtc-webkit/install
+          key: ${{ steps.install-cache.outputs.cache-primary-key }}
+
+      - name: Package and verify the transferable install
+        if: steps.published.outputs.ready != 'true'
+        shell: bash
+        run: |
+          python3 scripts/webkit-bundle.py pack
+          python3 scripts/webkit-bundle.py unpack \
+            --archive ".webrtc-webkit/bundle/$BUNDLE_TAG.tar.gz" \
+            --prefix "$RUNNER_TEMP/webkit-roundtrip/install"
+
+      - name: Publish the immutable dependency archive and SHA256
+        if: steps.published.outputs.ready != 'true'
+        shell: bash
+        run: |
+          gh release create "$BUNDLE_TAG" \
+            ".webrtc-webkit/bundle/$BUNDLE_TAG.tar.gz" \
+            ".webrtc-webkit/bundle/$BUNDLE_TAG.tar.gz.sha256" \
+            --target "$GITHUB_SHA" --prerelease \
+            --title "$BUNDLE_TAG (build dependency)" \
+            --notes "Versioned WebRTC-enabled WebKitGTK install for Ubuntu 24.04 x86-64. Identity covers the source version, build profile, package manifest and relocatable patch. This dependency archive is not the Teams AppImage. WebRTC calling was not verified."
+          echo "Published reusable dependency: $BUNDLE_TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preserve dependency build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: webkit-dependency-diagnostics
+          path: |
+            *-build.log
+            .webrtc-webkit/build/CMakeCache.txt
+            .webrtc-webkit/build/CMakeFiles/CMakeConfigureLog.yaml
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7

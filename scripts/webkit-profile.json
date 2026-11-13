@@ -1,0 +1,33 @@
+{
+  "format": 1,
+  "build_revision": 1,
+  "platform": "ubuntu-24.04-x86_64",
+  "source_version": "2.48.0",
+  "source_sha256": "94904a55cf12d44a4e36ceadafff02d46da73d76be9b4769f34cbfdf0eebf88e",
+  "cmake_options": [
+    "-DCMAKE_BUILD_TYPE=Release",
+    "-DCMAKE_INSTALL_LIBDIR=lib",
+    "-DCMAKE_INSTALL_LIBEXECDIR=libexec",
+    "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON",
+    "-DPORT=GTK",
+    "-DUSE_GTK4=OFF",
+    "-DUSE_SOUP2=OFF",
+    "-DENABLE_WEB_RTC=ON",
+    "-DENABLE_MEDIA_STREAM=ON",
+    "-DUSE_GSTREAMER_WEBRTC=ON",
+    "-DUSE_GSTREAMER_TRANSCODER=OFF",
+    "-DENABLE_DOCUMENTATION=OFF",
+    "-DENABLE_INTROSPECTION=OFF",
+    "-DENABLE_WEBDRIVER=OFF",
+    "-DENABLE_MINIBROWSER=ON",
+    "-DENABLE_GAMEPAD=OFF",
+    "-DENABLE_SPEECH_SYNTHESIS=OFF",
+    "-DENABLE_JOURNALD_LOG=OFF",
+    "-DUSE_AVIF=OFF",
+    "-DUSE_JPEGXL=OFF",
+    "-DUSE_WOFF2=OFF",
+    "-DUSE_LIBBACKTRACE=OFF",
+    "-DUSE_LIBHYPHEN=OFF",
+    "-DUSE_SYSPROF_CAPTURE=OFF"
+  ]
+}

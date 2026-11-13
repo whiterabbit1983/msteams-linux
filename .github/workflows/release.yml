@@ -34,10 +34,10 @@ on:
       - "scripts/**"
       - "package.json"
       - "package-lock.json"
-      - ".github/workflows/release.yml"
+      - ".github/workflows/**"
       - "tests/**"
 
-# Least privilege: only the publish job may write to the repository.
+# Only the AppImage publisher and isolated dependency producer may write releases.
 permissions:
   contents: read
 
@@ -47,6 +47,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Install system dependencies
         run: |
@@ -72,6 +74,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          cache-on-failure: true
+          cache-workspace-crates: true
 
       - name: Install Node.js
         uses: actions/setup-node@v7.1.0
@@ -99,29 +103,27 @@ jobs:
         working-directory: src-tauri
         run: cargo test --locked
 
+  prepare-webkit:
+    name: Ensure the permanent WebKitGTK dependency
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/webkit.yml
+    with:
+      ref: ${{ inputs.tag || github.ref }}
+    permissions:
+      contents: write
+
   build-appimage:
     name: Build AppImage
     # Skipped for pull requests: those only run the checks above.
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    needs: check
+    needs: prepare-webkit
     runs-on: ubuntu-24.04
     outputs:
       webrtc_smoke_status: ${{ steps.webrtc-smoke.outcome }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          # A manual run may ask for a tag other than the checked-out ref, so all
-          # tags have to be available for the checkout below.
-          fetch-depth: 0
-
-      - name: Check out the requested tag
-        # On a manual run the workflow may have been started from a branch while
-        # the user asked for a specific tag, so check that tag out explicitly.
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
-            git fetch --depth 1 origin "refs/tags/${{ inputs.tag }}:refs/tags/${{ inputs.tag }}"
-            git checkout "${{ inputs.tag }}"
-          fi
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Install system dependencies
         run: |
@@ -158,6 +160,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          cache-on-failure: true
+          cache-workspace-crates: true
 
       - name: Install Node.js
         uses: actions/setup-node@v7.1.0
@@ -174,12 +178,18 @@ jobs:
           path: ~/.cache/tauri
           key: tauri-appimage-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
 
-      - name: Restore compiled WebRTC-enabled WebKitGTK
-        id: webkit-cache
-        uses: actions/cache/restore@v6.1.0
-        with:
-          path: .webrtc-webkit/install
-          key: webrtc-webkit-install-${{ runner.os }}-${{ hashFiles('scripts/build-webrtc-webkit.sh', 'scripts/webrtc-packages.sh', 'scripts/install-webrtc-deps.sh', 'scripts/webkitgtk-relocatable.patch') }}
+      - name: Download and verify the versioned WebKitGTK install
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_TAG: ${{ needs.prepare-webkit.outputs.bundle_tag }}
+        run: |
+          destination="$RUNNER_TEMP/webkit-download"
+          mkdir -p "$destination"
+          gh release download "$BUNDLE_TAG" \
+            --pattern "$BUNDLE_TAG.tar.gz" --pattern "$BUNDLE_TAG.tar.gz.sha256" \
+            --dir "$destination"
+          python3 scripts/webkit-bundle.py unpack --archive "$destination/$BUNDLE_TAG.tar.gz"
 
       - name: Install and validate all WebKitGTK dependencies
         shell: bash
@@ -187,13 +197,8 @@ jobs:
           sudo bash scripts/install-webrtc-deps.sh 2>&1 | tee dependencies-build.log
           bash scripts/check-webrtc-deps.sh
 
-      - name: Configure WebKitGTK and validate dependency versions
-        if: steps.webkit-cache.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          ./scripts/build-webrtc-webkit.sh --system-deps --configure-only 2>&1 | tee configure-build.log
-
-      - name: Populate AppImage tooling
+      - name: Populate AppImage tooling only on a cache miss
+        if: steps.appimage-cache.outputs.cache-hit != 'true'
         run: npx tauri build --bundles appimage
 
       - name: Save AppImage tooling before runtime tests
@@ -202,20 +207,6 @@ jobs:
         with:
           path: ~/.cache/tauri
           key: ${{ steps.appimage-cache.outputs.cache-primary-key }}
-
-      - name: Build WebRTC-enabled WebKitGTK
-        if: steps.webkit-cache.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          cmake --build .webrtc-webkit/build --parallel 2 2>&1 | tee webkit-build.log
-          cmake --install .webrtc-webkit/build 2>&1 | tee -a webkit-build.log
-
-      - name: Save compiled WebKitGTK before runtime tests
-        if: steps.webkit-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6.1.0
-        with:
-          path: .webrtc-webkit/install
-          key: ${{ steps.webkit-cache.outputs.cache-primary-key }}
 
       - name: Build the AppImage
         shell: bash
@@ -284,7 +275,7 @@ jobs:
 
   publish:
     name: Publish release
-    needs: build-appimage
+    needs: [check, build-appimage]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     permissions:

@@ -6,9 +6,13 @@ SYSROOT="$ROOT/.tauri-sysroot"
 WORK="$ROOT/.webrtc-webkit"
 PREFIX="$WORK/install"
 ARCH="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || gcc -print-multiarch 2>/dev/null || echo x86_64-linux-gnu)"
-VERSION=2.48.0
-SHA256=94904a55cf12d44a4e36ceadafff02d46da73d76be9b4769f34cbfdf0eebf88e
-JOBS="${JOBS:-2}"
+BUNDLE="$ROOT/scripts/webkit-bundle.py"
+VERSION="$(python3 "$BUNDLE" version)"
+SHA256="$(python3 "$BUNDLE" source-sha256)"
+JOBS="${JOBS:-$(python3 "$BUNDLE" jobs)}"
+# WebKit 2.48 reads these environment variables when it defines Ninja pools.
+export WEBKIT_NINJA_LINK_MAX="${WEBKIT_NINJA_LINK_MAX:-1}"
+export WEBKIT_NINJA_COMPILE_MAX="${WEBKIT_NINJA_COMPILE_MAX:-$JOBS}"
 USE_SYSROOT=1
 CONFIGURE_ONLY=0
 for arg in "$@"; do
@@ -83,32 +87,12 @@ elif ! patch --dry-run --silent --reverse -p1 -d "$WORK/webkitgtk-$VERSION" < "$
   exit 1
 fi
 
+CMAKE_OPTIONS=()
+while IFS= read -r option; do
+  CMAKE_OPTIONS+=("$option")
+done < <(python3 "$BUNDLE" options)
 cmake -S "$WORK/webkitgtk-$VERSION" -B "$WORK/build" -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-  -DCMAKE_INSTALL_LIBDIR=lib \
-  -DCMAKE_INSTALL_LIBEXECDIR=libexec \
-  -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
-  -DPORT=GTK \
-  -DUSE_GTK4=OFF \
-  -DUSE_SOUP2=OFF \
-  -DENABLE_WEB_RTC=ON \
-  -DENABLE_MEDIA_STREAM=ON \
-  -DUSE_GSTREAMER_WEBRTC=ON \
-  -DUSE_GSTREAMER_TRANSCODER=OFF \
-  -DENABLE_DOCUMENTATION=OFF \
-  -DENABLE_INTROSPECTION=OFF \
-  -DENABLE_WEBDRIVER=OFF \
-  -DENABLE_MINIBROWSER=ON \
-  -DENABLE_GAMEPAD=OFF \
-  -DENABLE_SPEECH_SYNTHESIS=OFF \
-  -DENABLE_JOURNALD_LOG=OFF \
-  -DUSE_AVIF=OFF \
-  -DUSE_JPEGXL=OFF \
-  -DUSE_WOFF2=OFF \
-  -DUSE_LIBBACKTRACE=OFF \
-  -DUSE_LIBHYPHEN=OFF \
-  -DUSE_SYSPROF_CAPTURE=OFF
+  -DCMAKE_INSTALL_PREFIX="$PREFIX" "${CMAKE_OPTIONS[@]}"
 
 if (( CONFIGURE_ONLY )); then
   echo "WebKitGTK dependency validation and CMake configuration: OK"
