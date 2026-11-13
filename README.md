@@ -206,7 +206,12 @@ before passing. No recording is saved and no media leaves the machine.
 
 The packaged smoke check uses generated audio/video instead of hardware devices,
 but exercises the same real WebRTC, ICE, codecs and decoders. The release
-workflow runs it in a virtual display before publishing an AppImage.
+workflow runs it in a virtual display before publishing an AppImage. CI starts
+PulseAudio with a virtual null sink so WebAudio can run without a physical sound
+device. The check waits for positive inbound audio/video RTP counters **and**
+advancing decoded playback, rather than sampling stats once after 1.5 seconds.
+Failure logs include the sender/receiver counters, track states and audio context
+state; a failed candidate is kept as `unverified-appimage`, not published.
 
 This is a hand-driven packaging run because the upstream `tauri build
 --bundles appimage` conflicts with the local sysroot (its gtk plugin asks
@@ -242,8 +247,10 @@ the full GTK/media stack, then configures WebKitGTK with
 `Microsoft_Teams-<version>-x86_64.AppImage` and uploaded as a release asset.
 
 Rust, npm, WebKitGTK and the `~/.cache/tauri` AppImage tooling are cached between
-runs. WebKitGTK, AppImage packaging and the packaged WebRTC check are separate
-steps. The `build-diagnostics` artifact retains their logs for 7 days, including
+runs. The installed WebKitGTK and AppImage tools are saved immediately after
+their successful build, before runtime tests; a smoke-test failure does not discard
+the expensive WebKitGTK cache. A matching installed cache skips recompilation.
+WebKitGTK, AppImage packaging and the packaged WebRTC check are separate steps. The `build-diagnostics` artifact retains their logs for 7 days, including
 when a build fails. The check job also tests the early dependency gate.
 The JavaScript-based Actions use the Node.js 24 runner runtime; the app's
 Node.js toolchain is configured separately by `setup-node`.

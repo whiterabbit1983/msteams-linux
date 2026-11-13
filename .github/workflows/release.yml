@@ -80,6 +80,7 @@ jobs:
         run: |
           for script in scripts/*.sh; do bash -n "$script"; done
           python3 -m unittest discover -s tests -v
+          node --test tests/*.test.mjs
 
       - name: Format
         working-directory: src-tauri
@@ -140,6 +141,8 @@ jobs:
             gstreamer1.0-pulseaudio \
             xvfb \
             xauth \
+            pulseaudio \
+            pulseaudio-utils \
             pkg-config
 
       - name: Install Rust
@@ -157,19 +160,19 @@ jobs:
 
       - run: npm ci --no-audit --no-fund
 
-      - name: Cache AppImage tooling
-        uses: actions/cache@v6.1.0
+      - name: Restore AppImage tooling
+        id: appimage-cache
+        uses: actions/cache/restore@v6.1.0
         with:
           path: ~/.cache/tauri
           key: tauri-appimage-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
 
-      - name: Cache WebRTC-enabled WebKitGTK
-        uses: actions/cache@v6.1.0
+      - name: Restore compiled WebRTC-enabled WebKitGTK
+        id: webkit-cache
+        uses: actions/cache/restore@v6.1.0
         with:
-          path: |
-            .webrtc-webkit/install
-            .webrtc-webkit/build
-          key: webrtc-webkit-${{ runner.os }}-${{ hashFiles('scripts/build-webrtc-webkit.sh', 'scripts/check-webrtc-deps.sh', 'scripts/webrtc-packages.sh', 'scripts/install-webrtc-deps.sh', 'scripts/webkitgtk-relocatable.patch') }}
+          path: .webrtc-webkit/install
+          key: webrtc-webkit-install-${{ runner.os }}-${{ hashFiles('scripts/build-webrtc-webkit.sh', 'scripts/webrtc-packages.sh', 'scripts/install-webrtc-deps.sh', 'scripts/webkitgtk-relocatable.patch') }}
 
       - name: Install and validate all WebKitGTK dependencies
         shell: bash
@@ -178,6 +181,7 @@ jobs:
           bash scripts/check-webrtc-deps.sh
 
       - name: Configure WebKitGTK and validate dependency versions
+        if: steps.webkit-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           ./scripts/build-webrtc-webkit.sh --system-deps --configure-only 2>&1 | tee configure-build.log
@@ -185,11 +189,26 @@ jobs:
       - name: Populate AppImage tooling
         run: npx tauri build --bundles appimage
 
+      - name: Save AppImage tooling before runtime tests
+        if: steps.appimage-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: ~/.cache/tauri
+          key: ${{ steps.appimage-cache.outputs.cache-primary-key }}
+
       - name: Build WebRTC-enabled WebKitGTK
+        if: steps.webkit-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           cmake --build .webrtc-webkit/build --parallel 2 2>&1 | tee webkit-build.log
           cmake --install .webrtc-webkit/build 2>&1 | tee -a webkit-build.log
+
+      - name: Save compiled WebKitGTK before runtime tests
+        if: steps.webkit-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: .webrtc-webkit/install
+          key: ${{ steps.webkit-cache.outputs.cache-primary-key }}
 
       - name: Build the AppImage
         shell: bash
@@ -198,7 +217,22 @@ jobs:
       - name: Test the packaged WebRTC runtime
         shell: bash
         run: |
-          timeout 90 xvfb-run -a ./Microsoft_Teams-x86_64.AppImage \
+          # A hosted runner has no sound device or running audio daemon. Give
+          # WebAudio a real PulseAudio server backed by a virtual null sink.
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/msteams-runtime"
+          mkdir -p "$XDG_RUNTIME_DIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          pulseaudio --start --exit-idle-time=-1 --log-target="file:$PWD/pulseaudio.log"
+          trap 'pulseaudio --kill || true' EXIT
+          export PULSE_SERVER="unix:$XDG_RUNTIME_DIR/pulse/native"
+          pactl load-module module-null-sink sink_name=webrtc_ci rate=48000 channels=2
+          pactl set-default-sink webrtc_ci
+          pactl set-default-source webrtc_ci.monitor
+          pactl info
+          export ALSOFT_DRIVERS=pulse
+          export LIBGL_ALWAYS_SOFTWARE=1
+          export GST_DEBUG=2
+          timeout 90 dbus-run-session -- xvfb-run -a ./Microsoft_Teams-x86_64.AppImage \
             --appimage-extract-and-run --webrtc-smoke 2>&1 | tee webrtc-smoke.log
 
       - name: Upload build diagnostics
@@ -209,10 +243,20 @@ jobs:
           path: |
             *-build.log
             webrtc-smoke.log
+            pulseaudio.log
             .webrtc-webkit/build/CMakeFiles/CMakeConfigureLog.yaml
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Upload unverified AppImage on failure
+        if: failure()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: unverified-appimage
+          path: Microsoft_Teams-*.AppImage
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Collect the artifact
         run: |
