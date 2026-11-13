@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "external-links",
+  "description": "Only the main Teams document can dispatch external chat links. The native command validates allowed URL schemes.",
+  "windows": ["main"],
+  "permissions": ["allow-open-external-link"],
+  "remote": {
+    "urls": [
+      "https://teams.microsoft.com/*",
+      "https://*.teams.microsoft.com/*",
+      "https://msteams.microsoft.com/*",
+      "https://*.msteams.microsoft.com/*",
+      "https://teams.live.com/*",
+      "https://*.teams.live.com/*",
+      "https://teams.cloud.microsoft/*",
+      "https://*.teams.cloud.microsoft/*"
+    ]
+  }
+}

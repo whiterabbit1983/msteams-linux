@@ -150,6 +150,7 @@ jobs:
             gstreamer1.0-pulseaudio \
             xvfb \
             xauth \
+            xdotool \
             pulseaudio \
             pulseaudio-utils \
             pkg-config
@@ -216,6 +217,10 @@ jobs:
         shell: bash
         run: bash scripts/check-appimage-startup.sh ./Microsoft_Teams-x86_64.AppImage
 
+      - name: Test real chat-link clicks and host-browser dispatch (not WebRTC)
+        shell: bash
+        run: bash scripts/check-appimage-links.sh ./Microsoft_Teams-x86_64.AppImage
+
       - name: Test the packaged WebRTC runtime (optional)
         id: webrtc-smoke
         if: github.event_name == 'workflow_dispatch' && inputs.webrtc_smoke
@@ -249,6 +254,7 @@ jobs:
             *-build.log
             webrtc-smoke.log
             startup-smoke.log
+            links-smoke.log
             pulseaudio.log
             .webrtc-webkit/build/CMakeFiles/CMakeConfigureLog.yaml
           include-hidden-files: true

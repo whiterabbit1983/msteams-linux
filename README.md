@@ -54,11 +54,11 @@ the probe never ran and Teams concluded the browser was broken.
 
 The fix has three parts:
 
-1. on Linux the navigation policy is installed directly on the WebKitGTK web
-   view (`install_navigation_policy`) instead of going through `on_navigation`,
-   and it only applies to **user-initiated** navigations (link clicks and form
-   submissions). Sub-frames, redirects and script-driven loads — which
-   WebKitGTK does not let us tell apart — are always left alone;
+1. on Linux real external anchor clicks use an injected capture handler and an
+   explicitly permitted native command, rather than `on_navigation`. Hidden
+   sub-frames and authentication redirects are left alone. A late WebKitGTK
+   `decide-policy` callback is not sufficient: Tauri's earlier handler can
+   consume the signal before our callback runs;
 2. `static.microsoft` (the OneCDN bucket Teams serves itself from) is part of
    `TRUSTED_HOSTS`, so Teams' own report pages stay inside the app;
 3. the third-party cookie settings are applied *before* the window navigates to
@@ -256,7 +256,11 @@ Before publishing, CI launches the **actual app** from an unrelated empty workin
 directory under D-Bus/Xvfb. The gate requires a Tauri/GTK main-window startup
 marker and a process that stays running for 20 seconds. This packaging/startup
 check is separate from the disabled-by-default WebRTC test and does not verify
-Teams sign-in or calls.
+Teams sign-in or calls. A second real-app integration gate uses X11 clicks in a
+controlled local HTML fixture: target-blank, same-frame Microsoft documentation
+and middle-click links must reach a host browser-launcher stub exactly once,
+without inherited AppImage loader paths; authentication must not be sent there.
+It does not require a Teams account or a real browser session.
 
 ### Reusable WebKitGTK binaries
 
@@ -353,15 +357,23 @@ Almost everything lives in `src-tauri/src/lib.rs`:
   error page), enables `MediaCapabilities` and asks for WebRTC support (see
   [Calls / WebRTC on Linux](#calls--webrtc-on-linux)). With `MSTEAMS_DEBUG=1`
   it also prints the resulting ITP and cookie-policy state.
-- `install_navigation_policy` (Linux only) — the "open external links in the
-  browser" rule, implemented on the WebKitGTK webview and restricted to
-  user-initiated navigations (see
-  [Why the "third-party cookies" error page used to appear](#why-the-third-party-cookies-error-page-used-to-appear)).
+- `src-tauri/src/link-policy.json`, `link_policy.rs` and `injected.js` — shared
+  classification for real chat-link clicks and native popups. Teams/authentication
+  stay in-app; ordinary external links, including SharePoint and Microsoft docs,
+  go to the system browser. The opener plugin's default JavaScript interceptor
+  is disabled; `open_external_link` has its own explicit IPC permission.
+- `src-tauri/src/external.rs` (Linux only) — launches `xdg-open`, then `gio open`
+  as a fallback, off the UI thread. Only the child environment loses AppImage
+  library/GTK paths; display, D-Bus and the host's browser PATH remain available.
+  Failures appear in the terminal log and a native notification.
 - `close_popups` — drops the leftover `auth-*` windows after sign-in.
 - `permission_response` — which permissions are auto-granted.
-- `INJECT_JS` — script injected into the Teams pages: it hooks the web
-  `Notification` API, watches `document.title` for the `(N)` unread counter and
-  forwards both to the `set_unread_count` / `show_notification` commands.
+- `INJECT_JS` / `src-tauri/src/injected.js` — captures real external link clicks,
+  hooks the web `Notification` API and watches the title for unread counts. Its
+  observer tracks only `<title>` and direct `<head>` changes, never the full
+  document, editor or virtualized message list. Mock tests verify that 10,000
+  body mutations cause zero title scans or native IPC calls. This removes a
+  wrapper overhead source; it is not a measured Teams frame-rate improvement.
 - `render_badge` — composites the red unread badge onto the tray icon.
 - The tray, its menu and the hide-to-tray close behaviour are set up in `run()`.
 

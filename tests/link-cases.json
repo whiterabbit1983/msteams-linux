@@ -1,0 +1,20 @@
+[
+  {"url":"https://example.org/message-link?x=1&y=2","external":true},
+  {"url":"https://learn.microsoft.com/en-us/docs/","external":true},
+  {"url":"https://tenant.sharepoint.com/report.docx","external":true},
+  {"url":"https://nam.safelinks.protection.outlook.com/?url=https%3A%2F%2Fexample.org","external":true},
+  {"url":"https://teams.microsoft.com/v2/","external":false},
+  {"url":"https://teams.cloud.microsoft/chat/","external":false},
+  {"url":"https://login.microsoftonline.com/common/oauth2/authorize","external":false},
+  {"url":"https://login.live.com/oauth20_authorize.srf","external":false},
+  {"url":"https://account.live.com/consent","external":false},
+  {"url":"https://device.msftauth.net/auth","external":false},
+  {"url":"https://teams.microsoft.com.evil.example/chat","external":true},
+  {"url":"https://evilteams.microsoft.com/chat","external":true},
+  {"url":"mailto:person@example.org","external":true},
+  {"url":"tel:+123456789","external":true},
+  {"url":"file:///etc/passwd","external":false},
+  {"url":"javascript:alert(1)","external":false},
+  {"url":"data:text/plain,test","external":false},
+  {"url":"about:blank","external":false}
+]

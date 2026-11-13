@@ -1,0 +1,20 @@
+{
+  "teamsHosts": [
+    "teams.microsoft.com",
+    "msteams.microsoft.com",
+    "teams.live.com",
+    "teams.cloud.microsoft"
+  ],
+  "authenticationHosts": [
+    "login.microsoftonline.com",
+    "login.microsoft.com",
+    "login.live.com",
+    "account.live.com",
+    "account.microsoft.com",
+    "login.windows.net",
+    "msauth.net",
+    "msftauth.net",
+    "msauthimages.net",
+    "msftauthimages.net"
+  ]
+}

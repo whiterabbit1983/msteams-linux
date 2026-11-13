@@ -15,6 +15,10 @@
 //!   drive a red unread-count badge on the system tray icon,
 //! * closing the window hides the app to the tray instead of quitting.
 
+#[cfg(target_os = "linux")]
+mod external;
+mod link_policy;
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -22,7 +26,7 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    webview::{NewWindowResponse, PermissionKind, PermissionResponse},
+    webview::{NewWindowFeatures, NewWindowResponse, PermissionKind, PermissionResponse},
     AppHandle, Manager, Runtime, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 use tauri_plugin_notification::NotificationExt;
@@ -95,18 +99,59 @@ fn is_trusted(url: &Url) -> bool {
         .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
 }
 
-/// Opens a URL in the user's default browser.
-///
-/// The opener plugin waits for the browser launcher to exit, which can take a
-/// while, so it runs off the UI thread: on Linux this is called from inside a
-/// WebKitGTK policy decision and blocking there would freeze the window.
+/// Called only from workers: a desktop browser launcher can block.
+fn launch_external<R: Runtime>(_app: &AppHandle<R>, url: &Url) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        external::open(url.as_str())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        use tauri_plugin_opener::OpenerExt;
+        _app.opener()
+            .open_url(url.as_str(), None::<&str>)
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn report_external_error<R: Runtime>(app: &AppHandle<R>, error: &str) {
+    eprintln!("[msteams] Could not open external link: {error}");
+    let _ = app.notification().builder()
+        .title("Could not open link")
+        .body("Check your default browser and xdg-open configuration. See the terminal log for details.")
+        .show();
+}
+
 fn open_external<R: Runtime>(app: &AppHandle<R>, url: &Url) {
+    if !link_policy::can_open_external(url) {
+        eprintln!("[msteams] Refused external URL scheme: {}", url.scheme());
+        return;
+    }
     let app = app.clone();
     let url = url.clone();
     std::thread::spawn(move || {
-        use tauri_plugin_opener::OpenerExt;
-        let _ = app.opener().open_url(url.as_str(), None::<&str>);
+        if let Err(error) = launch_external(&app, &url) {
+            report_external_error(&app, &error);
+        }
     });
+}
+
+/// A click captured in the Teams document, with explicit scoped IPC permission.
+#[tauri::command]
+async fn open_external_link(app: AppHandle, url: String) -> Result<(), String> {
+    let url = Url::parse(&url).map_err(|error| error.to_string())?;
+    if !link_policy::should_open_external(&url) {
+        return Err("Only external web, mail and telephone links are allowed".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = launch_external(&app, &url);
+        if let Err(error) = &result {
+            report_external_error(&app, error);
+        }
+        result
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Camera, microphone and notifications must be granted for Teams calls and
@@ -121,6 +166,21 @@ fn permission_response(kind: PermissionKind) -> PermissionResponse {
         | PermissionKind::PointerLock
         | PermissionKind::Autoplay => PermissionResponse::Allow,
         _ => PermissionResponse::Default,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn navigate_initial<R: Runtime>(window: &WebviewWindow<R>, url: Url) {
+    if std::env::var_os("MSTEAMS_UI_CHECK").is_some() && window.label() == "main" {
+        use webkit2gtk::WebViewExt;
+        let _ = window.with_webview(|webview| {
+            webview.inner().load_html(
+                include_str!("ui-check.html"),
+                Some("https://teams.microsoft.com/v2/"),
+            );
+        });
+    } else {
+        let _ = window.navigate(url);
     }
 }
 
@@ -156,6 +216,15 @@ fn configure_webkit<R: Runtime>(window: &WebviewWindow<R>, url: Url) {
 
     let _ = window.with_webview(move |webview| {
         let view = webview.inner();
+        if std::env::var_os("MSTEAMS_UI_CHECK").is_some() {
+            view.connect_load_changed(|view, event| {
+                if event == webkit2gtk::LoadEvent::Finished
+                    && view.title().as_deref() == Some("Microsoft Teams UI check")
+                {
+                    println!("MSTEAMS_UI_READY");
+                }
+            });
+        }
 
         if let Some(settings) = view.settings() {
             settings.set_enable_webrtc(true);
@@ -192,7 +261,7 @@ fn configure_webkit<R: Runtime>(window: &WebviewWindow<R>, url: Url) {
         .collect();
 
         if cookie_managers.is_empty() {
-            let _ = navigate_window.navigate(url);
+            navigate_initial(&navigate_window, url);
             return;
         }
 
@@ -211,72 +280,10 @@ fn configure_webkit<R: Runtime>(window: &WebviewWindow<R>, url: Url) {
                 }
                 pending.set(pending.get() - 1);
                 if pending.get() == 0 {
-                    let _ = window.navigate(url);
+                    navigate_initial(&window, url);
                 }
             });
         }
-    });
-}
-
-/// Installs the "external links open in the system browser" policy directly on
-/// the WebKitGTK webview.
-///
-/// Tauri's `on_navigation` is a thin wrapper around WebKitGTK's
-/// `decide-policy` signal, which is emitted for **every** frame — including
-/// sub-frames. Teams loads part of itself in hidden iframes (the
-/// third-party-cookie probe, widgets, …); blocking those because their host is
-/// not in `TRUSTED_HOSTS` hijacked them into the user's browser and made Teams
-/// believe the browser was broken.
-///
-/// WebKitGTK does not expose whether a navigation targets the main frame, so
-/// the policy is only applied where it cannot break the page: user-initiated
-/// navigations (link clicks and form submissions) to hosts outside
-/// `TRUSTED_HOSTS` are opened in the browser, everything else — sub-frames,
-/// redirects and script-driven loads — is left alone.
-#[cfg(target_os = "linux")]
-fn install_navigation_policy<R: Runtime>(window: &WebviewWindow<R>, app: AppHandle<R>) {
-    use webkit2gtk::{
-        glib::Cast, NavigationPolicyDecision, NavigationPolicyDecisionExt, PolicyDecisionExt,
-        PolicyDecisionType, URIRequestExt, WebViewExt,
-    };
-
-    let _ = window.with_webview(move |webview| {
-        let view = webview.inner();
-
-        view.connect_decide_policy(move |_view, decision, decision_type| {
-            if decision_type != PolicyDecisionType::NavigationAction {
-                return false;
-            }
-
-            let Some(action) = decision
-                .clone()
-                .downcast::<NavigationPolicyDecision>()
-                .ok()
-                .and_then(|decision| decision.navigation_action())
-            else {
-                return false;
-            };
-
-            let Some(url) = action
-                .request()
-                .and_then(|request| request.uri())
-                .and_then(|uri| uri.parse::<Url>().ok())
-            else {
-                return false;
-            };
-
-            if is_trusted(&url) || !action.is_user_gesture() {
-                return false;
-            }
-
-            if std::env::var_os("MSTEAMS_DEBUG").is_some() {
-                eprintln!("[msteams] external link: {url}");
-            }
-
-            open_external(&app, &url);
-            decision.ignore();
-            true
-        });
     });
 }
 
@@ -288,7 +295,9 @@ fn create_window<R: Runtime>(
     url: Url,
     kind: WindowKind,
     data_dir: PathBuf,
+    features: Option<NewWindowFeatures>,
 ) -> tauri::Result<WebviewWindow<R>> {
+    #[cfg(not(target_os = "linux"))]
     let nav_app = app.clone();
     let popup_app = app.clone();
     let popup_dir = data_dir.clone();
@@ -303,11 +312,15 @@ fn create_window<R: Runtime>(
         .title("Microsoft Teams")
         .data_directory(data_dir)
         .min_inner_size(400.0, 300.0)
-        .initialization_script(INJECT_JS);
+        .initialization_script(format!(
+            "({INJECT_JS})({}, {});",
+            link_policy::JSON,
+            serde_json::to_string(label).expect("valid window label")
+        ));
 
-    // Keep Teams/Microsoft navigation in-app, send the rest to the browser. On
-    // Linux the policy is installed on the WebKitGTK webview instead, because
-    // Tauri's handler also sees (and would block) sub-frame navigations.
+    // Linux normal-link clicks use the scoped injected bridge. A late GTK
+    // decide-policy handler cannot run before Tauri's existing handler, and
+    // on_navigation cannot distinguish hidden authentication subframes.
     #[cfg(not(target_os = "linux"))]
     let builder = builder.on_navigation(move |url| {
         if is_trusted(url) {
@@ -318,11 +331,17 @@ fn create_window<R: Runtime>(
         }
     });
 
+    let builder = if let Some(features) = features {
+        // WebKit requires an OAuth popup to be related to its opener.
+        builder.window_features(features)
+    } else {
+        builder
+    };
     let builder = builder
         // `window.open` / target="_blank": complete OAuth popups in-app, open
         // ordinary web links in the system browser.
-        .on_new_window(move |url, _features| {
-            if is_trusted(&url) {
+        .on_new_window(move |url, features| {
+            if is_trusted(&url) && !link_policy::should_open_external(&url) {
                 let label = format!("auth-{}", WINDOW_SEQ.fetch_add(1, Ordering::Relaxed));
                 match create_window(
                     &popup_app,
@@ -330,8 +349,14 @@ fn create_window<R: Runtime>(
                     url,
                     WindowKind::Popup,
                     popup_dir.clone(),
+                    Some(features),
                 ) {
-                    Ok(window) => NewWindowResponse::Create { window },
+                    Ok(window) => {
+                        if std::env::var_os("MSTEAMS_UI_CHECK").is_some() {
+                            println!("MSTEAMS_AUTH_POPUP_CREATED");
+                        }
+                        NewWindowResponse::Create { window }
+                    }
                     Err(_) => NewWindowResponse::Deny,
                 }
             } else {
@@ -351,7 +376,6 @@ fn create_window<R: Runtime>(
     #[cfg(target_os = "linux")]
     {
         configure_webkit(&window, url);
-        install_navigation_policy(&window, nav_app);
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -367,78 +391,7 @@ fn create_window<R: Runtime>(
 /// which is the most reliable in-app signal, and (2) the unread counter Teams
 /// puts in `document.title` (e.g. `(3) Microsoft Teams...`). Whichever is
 /// higher wins, and the counter resets when the user looks at the window.
-const INJECT_JS: &str = r#"
-(function () {
-  if (window.__msteamsHooked) return;
-  window.__msteamsHooked = true;
-
-  var sessionCount = 0;
-  var titleCount = 0;
-  var last = -1;
-
-  function current() { return Math.max(sessionCount, titleCount); }
-
-  function report() {
-    var c = current();
-    if (c === last) return;
-    last = c;
-    try {
-      window.__TAURI_INTERNALS__.invoke("set_unread_count", { count: c });
-    } catch (e) {}
-  }
-
-  function notify(title, body) {
-    try {
-      window.__TAURI_INTERNALS__.invoke("show_notification", {
-        title: String(title == null ? "Microsoft Teams" : title),
-        body: String(body == null ? "" : body)
-      });
-    } catch (e) {}
-  }
-
-  try {
-    function TmsNotification(title, options) {
-      options = options || {};
-      sessionCount += 1;
-      report();
-      notify(title, options.body);
-      this.title = title;
-      this.body = options.body || "";
-      this.onclick = null;
-      this.close = function () {};
-      this.addEventListener = function () {};
-      this.removeEventListener = function () {};
-      this.dispatchEvent = function () { return true; };
-    }
-    TmsNotification.permission = "granted";
-    TmsNotification.requestPermission = function (cb) {
-      if (typeof cb === "function") cb("granted");
-      return Promise.resolve("granted");
-    };
-    window.Notification = TmsNotification;
-  } catch (e) {}
-
-  function scanTitle() {
-    var m = /^\(\s*(\d+)\s*\)/.exec(document.title || "");
-    var n = m ? parseInt(m[1], 10) : 0;
-    if (n !== titleCount) { titleCount = n; report(); }
-  }
-
-  try {
-    var head = document.head || document.documentElement;
-    new MutationObserver(scanTitle).observe(head, {
-      subtree: true, childList: true, characterData: true
-    });
-  } catch (e) {}
-
-  window.addEventListener("focus", function () { sessionCount = 0; report(); });
-  document.addEventListener("visibilitychange", function () {
-    if (!document.hidden) { sessionCount = 0; report(); }
-  });
-  setInterval(scanTitle, 3000);
-  setTimeout(scanTitle, 1500);
-})();
-"#;
+const INJECT_JS: &str = include_str!("injected.js");
 
 /// Shared unread-message count driving the tray badge.
 struct Unread(AtomicU32);
@@ -593,11 +546,19 @@ fn show_notification(app: AppHandle, title: String, body: String) {
 /// mobile targets.
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+        // The default JS interceptor cancels target=_blank clicks and invokes
+        // an ungranted plugin command. Our explicit, scoped click bridge handles
+        // chat links without hijacking authentication popups.
+        .plugin(
+            tauri_plugin_opener::Builder::new()
+                .open_js_links_on_click(false)
+                .build(),
+        )
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             set_unread_count,
-            show_notification
+            show_notification,
+            open_external_link
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
@@ -645,7 +606,7 @@ pub fn run() {
             tray.build(app)?;
 
             let url = Url::parse(TEAMS_URL).expect("TEAMS_URL is a valid URL");
-            let main = create_window(app.handle(), "main", url, WindowKind::Main, data_dir)?;
+            let main = create_window(app.handle(), "main", url, WindowKind::Main, data_dir, None)?;
             if std::env::var_os("MSTEAMS_STARTUP_CHECK").is_some() {
                 // The packaging check must reach the actual Tauri/GTK window,
                 // not just keep an AppImage launcher process alive.
