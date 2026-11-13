@@ -296,6 +296,27 @@ the expected AppImage is missing.
 Publishing needs no extra setup beyond the default `GITHUB_TOKEN`, since the
 workflow pushes to the same repository it is triggered from.
 
+### Measured CI timings
+
+Ubuntu 24.04 GitHub-hosted runners, elapsed wall time (including setup and uploads):
+
+| Measurement | Before ([run 8](https://github.com/whiterabbit1983/msteams-linux/actions/runs/43424590282)) | After ([run 9](https://github.com/whiterabbit1983/msteams-linux/actions/runs/43430830299)) |
+| --- | --- | --- |
+| Entire release workflow | 13 min 56 s | 10 min 14 s |
+| AppImage job | 11 min 45 s | 7 min 26 s |
+| Redundant Tauri tooling build | 5 min 36 s | skipped (tooling cache hit) |
+| WebKit binary download, checksum/profile/ELF validation and install | installed cache used | 6 s from the permanent dependency release |
+| Actual app startup gate | absent | passed, 20 s |
+
+Run 9 includes waiting for the initial dependency archive producer. Total time
+fell by about **27%**, despite adding the real application startup gate. Runner
+load and cache state can change these timings. The historical WebKit source
+compilation took 3 h 51 min; binary reuse avoids that compilation, rather than
+making the same compilation finish in 6 seconds. The new cold-build ccache and
+Ninja configuration passed Linux CMake validation, but a complete cold rebuild
+was not repeated or benchmarked after this change. Neither these timings nor
+the startup gate validate Teams sign-in or audio/video calls.
+
 ## Build & run
 
 Using the Tauri CLI (the normal workflow):
