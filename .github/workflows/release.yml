@@ -30,6 +30,7 @@ on:
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/release.yml"
+      - "tests/**"
 
 # Least privilege: only the publish job may write to the repository.
 permissions:
@@ -74,6 +75,11 @@ jobs:
           cache: npm
 
       - run: npm ci --no-audit --no-fund
+
+      - name: Check build scripts
+        run: |
+          for script in scripts/*.sh; do bash -n "$script"; done
+          python3 -m unittest discover -s tests -v
 
       - name: Format
         working-directory: src-tauri
@@ -127,6 +133,7 @@ jobs:
             squashfs-tools \
             gstreamer1.0-plugins-bad \
             gstreamer1.0-plugins-good \
+            gstreamer1.0-nice \
             gstreamer1.0-alsa \
             gstreamer1.0-gl \
             gstreamer1.0-pipewire \
@@ -162,20 +169,37 @@ jobs:
           path: |
             .webrtc-webkit/install
             .webrtc-webkit/build
-          key: webrtc-webkit-${{ runner.os }}-${{ hashFiles('scripts/build-webrtc-webkit.sh', 'scripts/webkitgtk-relocatable.patch') }}
+          key: webrtc-webkit-${{ runner.os }}-${{ hashFiles('scripts/build-webrtc-webkit.sh', 'scripts/check-webrtc-deps.sh', 'scripts/webkitgtk-relocatable.patch') }}
 
       - name: Populate AppImage tooling
         run: npx tauri build --bundles appimage
 
-      - name: Build WebKitGTK and the AppImage
-        run: |
-          ./scripts/build-webrtc-webkit.sh
-          ./scripts/build-appimage.sh
+      - name: Build WebRTC-enabled WebKitGTK
+        shell: bash
+        run: ./scripts/build-webrtc-webkit.sh 2>&1 | tee webkit-build.log
+
+      - name: Build the AppImage
+        shell: bash
+        run: ./scripts/build-appimage.sh 2>&1 | tee appimage-build.log
 
       - name: Test the packaged WebRTC runtime
+        shell: bash
         run: |
           timeout 90 xvfb-run -a ./Microsoft_Teams-x86_64.AppImage \
-            --appimage-extract-and-run --webrtc-smoke
+            --appimage-extract-and-run --webrtc-smoke 2>&1 | tee webrtc-smoke.log
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: |
+            *-build.log
+            webrtc-smoke.log
+            .webrtc-webkit/build/CMakeFiles/CMakeConfigureLog.yaml
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Collect the artifact
         run: |

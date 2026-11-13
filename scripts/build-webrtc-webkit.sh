@@ -23,6 +23,7 @@ cd "$SYSROOT/.debs"
   printf '%s\n' \
     libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
     libgstreamer-plugins-bad1.0-dev \
+    libunwind-dev libdw-dev libelf-dev \
     libgcrypt20-dev libgpg-error-dev \
     libharfbuzz-dev libdrm-dev libfontconfig-dev libfreetype-dev libicu-dev \
     liblcms2-dev libxslt1-dev libxml2-dev libsqlite3-dev libgudev-1.0-dev \
@@ -32,6 +33,7 @@ cd "$SYSROOT/.debs"
     libssl-dev \
     gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-good \
+    gstreamer1.0-nice \
     gstreamer1.0-alsa \
     gstreamer1.0-gl \
     gstreamer1.0-pipewire \
@@ -58,6 +60,10 @@ export PKG_CONFIG_ALLOW_SYSTEM_LIBS=1
 export LIBRARY_PATH="$SYSROOT/usr/lib/$ARCH:/usr/lib/$ARCH"
 export LD_LIBRARY_PATH="$SYSROOT/usr/lib/$ARCH:$SYSROOT/lib/$ARCH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export RUBYLIB="$SYSROOT/usr/lib/ruby/vendor_ruby/3.2.0:$SYSROOT/usr/lib/ruby/vendor_ruby:$SYSROOT/usr/lib/ruby/3.2.0:$SYSROOT/usr/lib/$ARCH/ruby/3.2.0${RUBYLIB:+:$RUBYLIB}"
+
+# CMake's GStreamer finder can find the libraries even when pkg-config fails.
+# In that case it silently drops the include flags and fails much later in C++.
+bash "$ROOT/scripts/check-webrtc-deps.sh"
 
 TARBALL="$WORK/webkitgtk-$VERSION.tar.xz"
 if [[ ! -f "$TARBALL" ]]; then

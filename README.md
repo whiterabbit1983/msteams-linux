@@ -77,6 +77,7 @@ The fix has three parts:
 │   ├── setup-sysroot.sh      # root-less build deps (fallback, see below)
 │   ├── build.sh              # build/run helper that wires up the sysroot
 │   ├── build-webrtc-webkit.sh # local WebKitGTK with WebRTC and media support
+│   ├── check-webrtc-deps.sh  # fail early on missing GStreamer headers/metadata
 │   └── build-appimage.sh     # Linux AppImage packaging for the sysroot setup
 └── src-tauri/
     ├── Cargo.toml
@@ -153,7 +154,11 @@ builds a compatible local copy instead of hiding the calling error:
 ```
 
 The build enables `ENABLE_MEDIA_STREAM`, `ENABLE_WEB_RTC` and the GStreamer
-WebRTC backend. `build.sh` automatically points both the app and WebKit's helper
+WebRTC backend. It includes GStreamer's transitive development dependencies
+(`libunwind-dev`, `libdw-dev`, `libelf-dev`) and the libnice ICE plugin. Before
+downloading or compiling WebKitGTK, it validates pkg-config metadata and compiles
+a small header-only check. This catches missing GStreamer include flags before
+a long build, rather than failing later with `gst/gst.h: No such file or directory`. `build.sh` automatically points both the app and WebKit's helper
 processes at this local copy. The AppImage build packages the same copy so calls
 also work without replacing the system's WebKitGTK. Camera and microphone access
 must be allowed by the desktop environment. For running from source on
@@ -161,7 +166,7 @@ Debian/Ubuntu/Mint, install the media runtime plugins:
 
 ```bash
 sudo apt install gstreamer1.0-plugins-bad gstreamer1.0-plugins-good \
-    gstreamer1.0-alsa gstreamer1.0-gl gstreamer1.0-pipewire \
+    gstreamer1.0-nice gstreamer1.0-alsa gstreamer1.0-gl gstreamer1.0-pipewire \
     gstreamer1.0-pulseaudio
 ```
 
@@ -217,7 +222,9 @@ scripts as a local build. The resulting file is renamed to
 `Microsoft_Teams-<version>-x86_64.AppImage` and uploaded as a release asset.
 
 Rust, npm, WebKitGTK and the `~/.cache/tauri` AppImage tooling are cached between
-runs.
+runs. WebKitGTK, AppImage packaging and the packaged WebRTC check are separate
+steps. The `build-diagnostics` artifact retains their logs for 7 days, including
+when a build fails. The check job also tests the early dependency gate.
 `contents: write` is granted to the `publish` job only.
 
 Publishing needs no extra setup beyond the default `GITHUB_TOKEN`, since the
