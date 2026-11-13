@@ -14,10 +14,21 @@ struct LaunchPermit;
 
 impl LaunchPermit {
     fn acquire() -> Result<Self, String> {
-        ACTIVE_LAUNCHERS.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
-            |active| (active < 4).then_some(active + 1))
-            .map(|_| Self)
-            .map_err(|_| "Too many browser launchers are still running; check the default browser configuration".into())
+        let mut active = ACTIVE_LAUNCHERS.load(Ordering::Relaxed);
+        loop {
+            if active >= 4 {
+                return Err("Too many browser launchers are still running; check the default browser configuration".into());
+            }
+            match ACTIVE_LAUNCHERS.compare_exchange_weak(
+                active,
+                active + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(Self),
+                Err(current) => active = current,
+            }
+        }
     }
 }
 

@@ -86,6 +86,17 @@ for (const { url, external } of cases) {
   });
 }
 
+test('the link command capability is explicitly enabled and the conflicting plugin interceptor is disabled', () => {
+  const config = JSON.parse(readFileSync(new URL('../src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
+  const capability = JSON.parse(readFileSync(new URL('../src-tauri/capabilities/external-links.json', import.meta.url), 'utf8'));
+  const native = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+  assert.ok(config.app.security.capabilities.includes(capability.identifier));
+  assert.deepEqual(capability.windows, ['main']);
+  assert.ok(capability.permissions.includes('allow-open-external-link'));
+  assert.ok(!capability.remote.urls.includes('https://*.microsoft.com/*'));
+  assert.ok(native.includes('.open_js_links_on_click(false)'));
+});
+
 test('same-frame and target=_blank links share the explicit scoped command', () => {
   const app = harness();
   assert.equal(app.listeners.get('click').capture, true);
