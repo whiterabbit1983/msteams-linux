@@ -3,9 +3,9 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 
-const context = vm.createContext({});
+const context = vm.createContext({ setTimeout, clearTimeout });
 vm.runInContext(readFileSync(new URL('../src-tauri/examples/webrtc-smoke.js', import.meta.url), 'utf8'), context);
-const { collectInboundMedia, mediaIsDecoded } = context;
+const { collectInboundMedia, mediaIsDecoded, withTimeout, startPlayback } = context;
 const sinks = [
   { tagName: 'AUDIO', currentTime: 1 },
   { tagName: 'VIDEO', currentTime: 1, videoWidth: 160 },
@@ -14,6 +14,26 @@ const sinks = [
 function collect(reports) {
   return Array.from(collectInboundMedia(new Map(reports.map(report => [report.id, report]))));
 }
+
+test('pending playback does not block RTP checks', () => {
+  let called = false;
+  const result = startPlayback({ play: () => { called = true; return new Promise(() => {}); } }, () => {});
+  assert.equal(called, true);
+  assert.equal(result, undefined);
+});
+
+test('playback rejection is reported instead of becoming unhandled', async () => {
+  const failure = new Error('decoder unavailable');
+  let reported;
+  startPlayback({ play: () => Promise.reject(failure) }, error => { reported = error; });
+  await new Promise(setImmediate);
+  assert.equal(reported, failure);
+});
+
+test('pending media API calls fail with the current phase', async () => {
+  await assert.rejects(withTimeout(new Promise(() => {}), 'receiver.getStats', 10), /Timed out: receiver.getStats/);
+  assert.equal(await withTimeout(Promise.resolve('ready'), 'ready', 100), 'ready');
+});
 
 test('requires positive inbound RTP bytes for both media kinds', () => {
   const media = collect([

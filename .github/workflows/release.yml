@@ -232,6 +232,7 @@ jobs:
           export ALSOFT_DRIVERS=pulse
           export LIBGL_ALWAYS_SOFTWARE=1
           export GST_DEBUG=2
+          export GST_DEBUG_NO_COLOR=1
           timeout 90 dbus-run-session -- xvfb-run -a ./Microsoft_Teams-x86_64.AppImage \
             --appimage-extract-and-run --webrtc-smoke 2>&1 | tee webrtc-smoke.log
 
