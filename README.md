@@ -154,8 +154,9 @@ builds a compatible local copy instead of hiding the calling error:
 ```
 
 The build enables `ENABLE_MEDIA_STREAM`, `ENABLE_WEB_RTC` and the GStreamer
-WebRTC backend. It includes GStreamer's transitive development dependencies
-(`libunwind-dev`, `libdw-dev`, `libelf-dev`) and the libnice ICE plugin. Before
+WebRTC backend. It resolves the transitive development dependencies of GStreamer
+core/base (including `libunwind-dev`, `libdw-dev`, `libelf-dev` and
+`liborc-0.4-dev`) through APT, and includes the libnice ICE plugin. Before
 downloading or compiling WebKitGTK, it validates pkg-config metadata and compiles
 a small header-only check. This catches missing GStreamer include flags before
 a long build, rather than failing later with `gst/gst.h: No such file or directory`. `build.sh` automatically points both the app and WebKit's helper

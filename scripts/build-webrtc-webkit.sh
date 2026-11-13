@@ -20,10 +20,16 @@ cd "$SYSROOT/.debs"
     cmake ninja-build ruby ruby-dev bison flex gperf unifdef gettext \
     libglib2.0-bin libglib2.0-dev-bin 2>/dev/null \
     | grep -E '^[a-zA-Z0-9]' | grep -v ':'
+  # apt-get download does not resolve dependencies. Include the complete dev
+  # closure for GST core/base: their .pc files also require libunwind, libdw,
+  # libelf and orc-0.4. CMake can otherwise find GST but lose its include flags.
+  apt-cache depends --recurse --no-recommends --no-suggests \
+    --no-conflicts --no-breaks --no-replaces --no-enhances \
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev 2>/dev/null \
+    | grep -E '^[a-zA-Z0-9]' | grep -v ':' | grep -E -- '-dev$'
   printf '%s\n' \
     libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
     libgstreamer-plugins-bad1.0-dev \
-    libunwind-dev libdw-dev libelf-dev \
     libgcrypt20-dev libgpg-error-dev \
     libharfbuzz-dev libdrm-dev libfontconfig-dev libfreetype-dev libicu-dev \
     liblcms2-dev libxslt1-dev libxml2-dev libsqlite3-dev libgudev-1.0-dev \
