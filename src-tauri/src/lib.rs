@@ -170,15 +170,15 @@ fn permission_response(kind: PermissionKind) -> PermissionResponse {
 }
 
 #[cfg(target_os = "linux")]
-fn navigate_initial<R: Runtime>(window: &WebviewWindow<R>, url: Url) {
+fn navigate_initial<R: Runtime>(window: &WebviewWindow<R>, url: Url, view: &webkit2gtk::WebView) {
     if std::env::var_os("MSTEAMS_UI_CHECK").is_some() && window.label() == "main" {
         use webkit2gtk::WebViewExt;
-        let _ = window.with_webview(|webview| {
-            webview.inner().load_html(
-                include_str!("ui-check.html"),
-                Some("https://teams.microsoft.com/v2/"),
-            );
-        });
+        eprintln!("[ui-check] loading local HTML on the GTK thread");
+        view.load_html(
+            include_str!("ui-check.html"),
+            Some("https://teams.microsoft.com/v2/"),
+        );
+        eprintln!("[ui-check] load_html returned");
     } else {
         let _ = window.navigate(url);
     }
@@ -213,15 +213,38 @@ fn configure_webkit<R: Runtime>(window: &WebviewWindow<R>, url: Url) {
 
     let debug = std::env::var_os("MSTEAMS_DEBUG").is_some();
     let navigate_window = window.clone();
+    if debug {
+        eprintln!("[msteams] configuring WebKit window {}", window.label());
+    }
 
-    let _ = window.with_webview(move |webview| {
+    if let Err(error) = window.with_webview(move |webview| {
         let view = webview.inner();
         if std::env::var_os("MSTEAMS_UI_CHECK").is_some() {
-            view.connect_load_changed(|view, event| {
-                if event == webkit2gtk::LoadEvent::Finished
-                    && view.title().as_deref() == Some("Microsoft Teams UI check")
-                {
+            view.connect_title_notify(|view| {
+                if view.title().as_deref() == Some("Microsoft Teams UI ready") {
                     println!("MSTEAMS_UI_READY");
+                }
+            });
+            view.connect_load_changed(|view, event| {
+                eprintln!("[ui-check] load {event:?}: uri={:?}, title={:?}", view.uri(), view.title());
+                if event == webkit2gtk::LoadEvent::Finished {
+                    // A title update need not arrive before LoadEvent::Finished.
+                    // Require the actual fixture DOM and bridge, then set a
+                    // native-observed readiness title from that loaded document.
+                    view.evaluate_javascript(r#"
+                      if (document.readyState === 'complete' && window.__msteamsHooked &&
+                          window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === 'function' &&
+                          document.querySelector('a[href^="https://example.invalid/chat-link"]')) {
+                        document.title = 'Microsoft Teams UI ready';
+                      } else {
+                        console.error('[ui-check] Document not ready', JSON.stringify({
+                          url: location.href, state: document.readyState,
+                          hooked: !!window.__msteamsHooked, bridge: !!window.__TAURI_INTERNALS__
+                        }));
+                      }
+                    "#, None, None, None::<&gio::Cancellable>, |result| {
+                        if let Err(error) = result { eprintln!("[ui-check] readiness JavaScript failed: {error}"); }
+                    });
                 }
             });
         }
@@ -261,7 +284,7 @@ fn configure_webkit<R: Runtime>(window: &WebviewWindow<R>, url: Url) {
         .collect();
 
         if cookie_managers.is_empty() {
-            navigate_initial(&navigate_window, url);
+            navigate_initial(&navigate_window, url, &view);
             return;
         }
 
@@ -274,17 +297,20 @@ fn configure_webkit<R: Runtime>(window: &WebviewWindow<R>, url: Url) {
             let pending = Rc::clone(&pending);
             let window = navigate_window.clone();
             let url = url.clone();
+            let view = view.clone();
             cookies.accept_policy(None::<&gio::Cancellable>, move |policy| {
                 if debug {
                     eprintln!("[msteams] cookie accept policy: {policy:?}");
                 }
                 pending.set(pending.get() - 1);
                 if pending.get() == 0 {
-                    navigate_initial(&window, url);
+                    navigate_initial(&window, url, &view);
                 }
             });
         }
-    });
+    }) {
+        eprintln!("[msteams] Could not configure WebKit: {error}");
+    }
 }
 
 /// Builds a WebView window that loads `url` and shares the common Teams

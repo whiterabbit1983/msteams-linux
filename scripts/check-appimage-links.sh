@@ -30,7 +30,10 @@ SH
 printf '#!/bin/sh\necho "Unexpected gio fallback in link check" >&2\nexit 92\n' > "$WORK/host-bin/gio"
 chmod +x "$WORK/host-bin/xdg-open" "$WORK/host-bin/gio"
 export PATH="$WORK/host-bin:$PATH"
-export MSTEAMS_UI_CHECK=1 LIBGL_ALWAYS_SOFTWARE=1
+export MSTEAMS_UI_CHECK=1 MSTEAMS_DEBUG=1 LIBGL_ALWAYS_SOFTWARE=1
+# Do not share WebKit's persistent database with the preceding startup check.
+export XDG_DATA_HOME="$WORK/data" XDG_CACHE_HOME="$WORK/cache" XDG_CONFIG_HOME="$WORK/config"
+mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME"
 cd "$WORK"
 "$IMAGE" --appimage-extract-and-run > "$LOG" 2>&1 &
 pid=$!
