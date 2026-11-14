@@ -47,16 +47,25 @@ function (linkPolicy, windowLabel) {
   let sessionCount = 0;
   let titleCount = 0;
   let last = -1;
+  let reportPending = false;
 
   function current() { return Math.max(sessionCount, titleCount); }
 
   function report() {
-    const count = current();
-    if (count === last) return;
-    last = count;
-    try {
-      Promise.resolve(window.__TAURI_INTERNALS__.invoke('set_unread_count', { count })).catch(() => {});
-    } catch (_) {}
+    if (reportPending || current() === last) return;
+    reportPending = true;
+    // A burst of notifications/title changes needs only one tray redraw. Use a
+    // bounded timer, not requestAnimationFrame (which stops in hidden windows)
+    // or a trailing debounce (which can starve during continuous activity).
+    setTimeout(function () {
+      reportPending = false;
+      const count = current();
+      if (count === last) return;
+      last = count;
+      try {
+        Promise.resolve(window.__TAURI_INTERNALS__.invoke('set_unread_count', { count })).catch(() => {});
+      } catch (_) {}
+    }, 100);
   }
 
   function notify(title, body) {
@@ -123,7 +132,6 @@ function (linkPolicy, windowLabel) {
   document.addEventListener('visibilitychange', function () {
     if (!document.hidden) { sessionCount = 0; report(); }
   });
-  // Fallback for pages that create/replace their title unusually; no DOM walk.
-  setInterval(scanTitle, 3000);
-  setTimeout(scanTitle, 1500);
+  // Title text, creation, removal and replacement are covered by the observers;
+  // no periodic polling is needed while the app is idle or hidden in the tray.
 }

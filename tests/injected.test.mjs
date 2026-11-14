@@ -12,6 +12,12 @@ function harness({ headInitially = true, bridge = true, windowLabel = 'main', lo
   const listeners = new Map();
   const documentListeners = new Map();
   const observers = [];
+  const timers = [];
+  const intervals = [];
+  function flushTimers() {
+    const pending = timers.splice(0);
+    for (const { callback } of pending) callback();
+  }
   const root = { tagName: 'HTML' };
   const body = { tagName: 'BODY', parent: root };
   const title = { tagName: 'TITLE' };
@@ -54,7 +60,9 @@ function harness({ headInitially = true, bridge = true, windowLabel = 'main', lo
   }
   const context = vm.createContext({
     window, document, location: { href: location },
-    URL, MutationObserver, console, setInterval: () => {}, setTimeout: () => {}, policy, windowLabel
+    URL, MutationObserver, console,
+    setInterval: (callback, delay) => intervals.push({ callback, delay }),
+    setTimeout: (callback, delay) => timers.push({ callback, delay }), policy, windowLabel
   });
   vm.runInContext(`(${source})(policy, windowLabel)`, context);
   function click(href, overrides = {}) {
@@ -69,7 +77,8 @@ function harness({ headInitially = true, bridge = true, windowLabel = 'main', lo
     return event;
   }
   return { calls, listeners, documentListeners, document, root, body, head, title,
-    observers, mutate, click, window, reads: () => titleReads, observerCalls: () => observerCalls };
+    observers, mutate, click, window, timers, intervals, flushTimers,
+    reads: () => titleReads, observerCalls: () => observerCalls };
 }
 
 for (const { url, external } of cases) {
@@ -152,10 +161,88 @@ test('title updates and title replacement still update the badge without duplica
   app.document.title = '(3) Microsoft Teams';
   app.mutate(app.title);
   app.mutate(app.title);
+  app.flushTimers();
   assert.deepEqual(app.calls.map(call => [call.command, call.args.count]), [['set_unread_count', 3]]);
   app.head.title = { tagName: 'TITLE', parent: app.head };
   app.document.title = '(5) Microsoft Teams';
   app.mutate(app.head);
   app.mutate(app.head.title);
+  app.flushTimers();
   assert.deepEqual(app.calls.map(call => call.args.count), [3, 5]);
+});
+
+test('idle and hidden documents do not install polling timers', () => {
+  const app = harness();
+  app.document.hidden = true;
+  app.documentListeners.get('visibilitychange')();
+  assert.equal(app.intervals.length, 0);
+  assert.equal(app.timers.length, 0);
+});
+
+test('100 notifications and title changes coalesce into one badge update, even while hidden', () => {
+  const app = harness();
+  app.document.hidden = true;
+  for (let count = 1; count <= 100; count++) {
+    new app.window.Notification(`Message ${count}`, { body: 'Body' });
+    app.document.title = `(${count}) Microsoft Teams`;
+    app.mutate(app.title);
+  }
+  // Notifications are delivered immediately, only the badge is batched.
+  assert.equal(app.calls.filter(call => call.command === 'show_notification').length, 100);
+  assert.equal(app.calls.filter(call => call.command === 'set_unread_count').length, 0);
+  assert.equal(app.timers.length, 1);
+  assert.equal(app.timers[0].delay, 100);
+  app.flushTimers();
+  assert.deepEqual(app.calls.filter(call => call.command === 'set_unread_count').map(call => call.args.count), [100]);
+  assert.equal(app.timers.length, 0);
+  assert.equal(app.intervals.length, 0);
+  new app.window.Notification('Next message');
+  app.flushTimers();
+  assert.deepEqual(app.calls.filter(call => call.command === 'set_unread_count').map(call => call.args.count), [100, 101]);
+});
+
+test('pending reports use the latest count after focus/visibility resets', () => {
+  for (const reset of ['focus', 'visibilitychange']) {
+    const app = harness();
+    new app.window.Notification('Message');
+    if (reset === 'focus') app.listeners.get('focus').callback();
+    else app.documentListeners.get('visibilitychange')();
+    app.flushTimers();
+    assert.deepEqual(app.calls.filter(call => call.command === 'set_unread_count').map(call => call.args.count), [0]);
+  }
+});
+
+test('title creation, text removal and element removal work without polling', () => {
+  const app = harness();
+  app.head.title = null;
+  app.document.title = '';
+  app.mutate(app.head);
+  app.head.title = { tagName: 'TITLE', parent: app.head };
+  app.document.title = '(7) Microsoft Teams';
+  app.mutate(app.head);
+  app.flushTimers();
+  app.document.title = '';
+  app.mutate(app.head.title);
+  app.flushTimers();
+  app.document.title = '(2) Microsoft Teams';
+  app.mutate(app.head.title);
+  app.flushTimers();
+  app.head.title = null;
+  app.document.title = '';
+  app.mutate(app.head);
+  app.flushTimers();
+  assert.deepEqual(app.calls.map(call => call.args.count), [7, 0, 2, 0]);
+});
+
+test('transient title changes do not redraw an unchanged badge', () => {
+  const app = harness();
+  app.document.title = '(3) Microsoft Teams';
+  app.mutate(app.title);
+  app.flushTimers();
+  app.document.title = '(4) Microsoft Teams';
+  app.mutate(app.title);
+  app.document.title = '(3) Microsoft Teams';
+  app.mutate(app.title);
+  app.flushTimers();
+  assert.deepEqual(app.calls.map(call => call.args.count), [3]);
 });

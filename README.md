@@ -339,6 +339,64 @@ Or with the helper script:
 ./scripts/build.sh --run      # build + launch
 ```
 
+## Performance on Linux
+
+For everyday use, run a release build rather than the development wrapper:
+
+```bash
+./scripts/build.sh --run --release
+```
+
+Teams itself runs in WebKitGTK, not in Rust. The bundled WebKit profile already
+uses a release build; hardware acceleration and browser caching are enabled by
+WebKit by default. Changing Rust optimization flags will not speed up Teams'
+JavaScript. We deliberately do not force GPU/driver overrides or suspend hidden
+pages, which could break rendering, calls or notifications.
+
+The unread badge is event-driven: no periodic title polling runs while idle.
+Title changes and notification bursts share a single 100 ms batching window,
+including when hidden in the tray. Only the latest unread count crosses IPC and
+redraws the tray; individual desktop notifications are still sent immediately.
+Mock tests check that 100 notifications plus title changes in one window produce
+one badge IPC call, not 100. This reduces wrapper work, **not a measured Teams
+startup or frame-rate improvement**.
+
+If typing, scrolling or opening chats remains slow, collect diagnostics:
+
+```bash
+MSTEAMS_DEBUG=1 ./scripts/build.sh --run --release
+# Or for a rebuilt AppImage:
+MSTEAMS_DEBUG=1 ./Microsoft_Teams-x86_64.AppImage
+```
+
+Debug output includes the effective WebKit hardware-acceleration policy, cache
+model and inherited rendering/JIT overrides. `LIBGL_ALWAYS_SOFTWARE=1`,
+`WEBKIT_DISABLE_COMPOSITING_MODE=1` or `JSC_useJIT=false` can disable acceleration;
+`WEBKIT_DISABLE_DMABUF_RENDERER` selects a rendering workaround. These may have
+been set intentionally for driver issues; compare with and without them rather
+than removing them globally. An `Always` acceleration policy alone does not prove
+the GPU is being used (Mesa can still use a software renderer).
+
+On Linux, debug mode automatically opens WebKit's inspector once the main
+window commits its first non-blank page, including in release builds. No
+right-click menu or keyboard shortcut is needed: Teams can intercept those.
+OAuth popups do not auto-open inspectors, and closing the inspector keeps it
+closed across subsequent navigations. The automated `MSTEAMS_UI_CHECK` fixture
+suppresses auto-opening so the extra window cannot disturb click coordinates.
+
+In the inspector, select **Timelines**, record 10–15 seconds while reproducing
+the slowdown, then stop and **Export** the recording to a local file. This helps
+distinguish JavaScript/layout work from network waits. Quit other Teams instances
+using the tray's **Quit** action first (closing their windows only hides them).
+Disable debug mode for everyday use because console mirroring and profiling add
+work. Page logs and timeline recordings may contain account data; do not publish
+them without reviewing their contents.
+
+The opt-in native inspector test uses local HTML and an ephemeral WebKit context:
+`cargo test inspector_opens_once_for_real_page -- --ignored --test-threads=1`.
+It requires a graphical display and a working WebKit runtime (the same library
+and helper-process paths as the app when testing the bundled WebKit).
+
 ## Configuration
 
 Almost everything lives in `src-tauri/src/lib.rs`:
@@ -356,7 +414,7 @@ Almost everything lives in `src-tauri/src/lib.rs`:
   accept policy to *always* (without them Teams shows its third-party-cookie
   error page), enables `MediaCapabilities` and asks for WebRTC support (see
   [Calls / WebRTC on Linux](#calls--webrtc-on-linux)). With `MSTEAMS_DEBUG=1`
-  it also prints the resulting ITP and cookie-policy state.
+  it also prints the resulting ITP, cookie-policy, rendering and cache state.
 - `src-tauri/src/link-policy.json`, `link_policy.rs` and `injected.js` — shared
   classification for real chat-link clicks and native popups. Teams/authentication
   stay in-app; ordinary external links, including SharePoint and Microsoft docs,
@@ -372,8 +430,10 @@ Almost everything lives in `src-tauri/src/lib.rs`:
   hooks the web `Notification` API and watches the title for unread counts. Its
   observer tracks only `<title>` and direct `<head>` changes, never the full
   document, editor or virtualized message list. Mock tests verify that 10,000
-  body mutations cause zero title scans or native IPC calls. This removes a
-  wrapper overhead source; it is not a measured Teams frame-rate improvement.
+  body mutations cause zero title scans or native IPC calls. Badge updates are
+  batched over 100 ms without periodic title polling (see [Performance on
+  Linux](#performance-on-linux)). This removes wrapper overhead; it is not a
+  measured Teams frame-rate improvement.
 - `render_badge` — composites the red unread badge onto the tray icon.
 - The tray, its menu and the hide-to-tray close behaviour are set up in `run()`.
 

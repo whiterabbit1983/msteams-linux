@@ -184,6 +184,30 @@ fn navigate_initial<R: Runtime>(window: &WebviewWindow<R>, url: Url, view: &webk
     }
 }
 
+/// Open the native inspector once the real page is committed, not on the
+/// initial about:blank. Teams replaces the context menu, so enabling developer
+/// extras alone does not provide a reliable way to open it in release builds.
+#[cfg(target_os = "linux")]
+fn auto_open_inspector(view: &webkit2gtk::WebView) {
+    use std::cell::Cell;
+    use webkit2gtk::{LoadEvent, WebInspectorExt, WebViewExt};
+
+    let opened = Cell::new(false);
+    view.connect_load_changed(move |view, event| {
+        if event != LoadEvent::Committed
+            || opened.get()
+            || view.uri().as_deref() == Some("about:blank")
+        {
+            return;
+        }
+        if let Some(inspector) = view.inspector() {
+            opened.set(true);
+            inspector.show();
+            eprintln!("[msteams] opened WebKit inspector for the main window");
+        }
+    });
+}
+
 /// Applies the WebKitGTK settings Teams needs, which the Linux WebView does not
 /// enable by default:
 ///
@@ -260,7 +284,35 @@ fn configure_webkit<R: Runtime>(window: &WebviewWindow<R>, url: Url) {
             if debug {
                 settings.set_enable_write_console_messages_to_stdout(true);
                 settings.set_enable_developer_extras(true);
+                // Report the effective policy rather than forcing GPU settings:
+                // WebKit can fall back when the driver/system cannot accelerate.
+                eprintln!(
+                    "[msteams] WebKit hardware acceleration policy: {:?}",
+                    settings.hardware_acceleration_policy()
+                );
+                if let Some(context) = view.context() {
+                    eprintln!("[msteams] WebKit cache model: {:?}", context.cache_model());
+                }
+                for name in [
+                    "LIBGL_ALWAYS_SOFTWARE",
+                    "WEBKIT_DISABLE_COMPOSITING_MODE",
+                    "WEBKIT_DISABLE_DMABUF_RENDERER",
+                    "JSC_useJIT",
+                ] {
+                    if let Some(value) = std::env::var_os(name) {
+                        eprintln!("[msteams] inherited {name}={value:?}");
+                    }
+                }
             }
+        }
+
+        // Do not open inspectors for OAuth popups or the automated click fixture:
+        // an extra window would interfere with its window/coordinate checks.
+        if debug
+            && navigate_window.label() == "main"
+            && std::env::var_os("MSTEAMS_UI_CHECK").is_none()
+        {
+            auto_open_inspector(&view);
         }
 
         let manager = view.website_data_manager();
@@ -723,6 +775,71 @@ mod tests {
         ] {
             assert!(!is_trusted(&url(target)), "{target} must not be trusted");
         }
+    }
+
+    /// Run explicitly with a display and the same WebKit runtime as the app.
+    /// Uses only local HTML in an ephemeral context, never the Teams account.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a graphical display and WebKit helper processes"]
+    fn inspector_opens_once_for_real_page() {
+        use gtk::prelude::*;
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use std::time::{Duration, Instant};
+        use webkit2gtk::{SettingsExt, WebInspectorExt, WebViewExt};
+
+        fn wait_for(mut ready: impl FnMut() -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !ready() {
+                assert!(Instant::now() < deadline, "WebKit inspector test timed out");
+                while gtk::events_pending() {
+                    gtk::main_iteration_do(false);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        gtk::init().expect("GTK display");
+        let context = webkit2gtk::WebContext::new_ephemeral();
+        let view = webkit2gtk::WebView::with_context(&context);
+        WebViewExt::settings(&view)
+            .unwrap()
+            .set_enable_developer_extras(true);
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.set_title("Teams inspector test — local fixture");
+        window.add(&view);
+        window.show_all();
+        let inspector = view.inspector().unwrap();
+        let opens = Rc::new(Cell::new(0));
+        let count = Rc::clone(&opens);
+        inspector.connect_open_window(move |_| {
+            count.set(count.get() + 1);
+            false // Let WebKit create the actual inspector window.
+        });
+        auto_open_inspector(&view);
+
+        view.load_uri("about:blank");
+        wait_for(|| !view.is_loading());
+        assert_eq!(opens.get(), 0, "do not inspect the initial blank page");
+        view.load_html(
+            "<title>Inspector fixture</title>",
+            Some("https://example.invalid/"),
+        );
+        wait_for(|| opens.get() == 1);
+        assert!(inspector.web_view().is_some());
+        inspector.close();
+        view.load_html(
+            "<title>Second fixture</title>",
+            Some("https://example.invalid/"),
+        );
+        wait_for(|| view.title().as_deref() == Some("Second fixture") && !view.is_loading());
+        assert_eq!(
+            opens.get(),
+            1,
+            "navigation must not reopen a closed inspector"
+        );
+        window.close();
     }
 
     #[test]
