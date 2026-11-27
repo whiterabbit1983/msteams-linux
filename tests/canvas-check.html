@@ -1,0 +1,26 @@
+<!doctype html><meta charset="utf-8"><title>Canvas capture check</title>
+<canvas width="160" height="120"></canvas><video muted playsinline></video>
+<script>
+(async () => {
+  const canvas = document.querySelector('canvas');
+  const video = document.querySelector('video');
+  const ctx = canvas.getContext('2d');
+  const stream = canvas.captureStream(10);
+  video.srcObject = stream;
+  let draws = 0;
+  const timer = setInterval(() => {
+    ctx.fillStyle = ++draws % 2 ? '#146eb4' : '#d83b01';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }, 50);
+  try {
+    await video.play();
+    const before = video.currentTime;
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    if (!video.videoWidth || video.currentTime <= before) throw Error('capture preview stalled');
+    document.title = `PASS canvas preview ${video.videoWidth}x${video.videoHeight}, ${draws} draws`;
+  } finally {
+    clearInterval(timer);
+    stream.getTracks().forEach(track => track.stop());
+  }
+})().catch(e => { document.title = 'ERROR ' + e.message; });
+</script>

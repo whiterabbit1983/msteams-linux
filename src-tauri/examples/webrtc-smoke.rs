@@ -4,6 +4,9 @@ use std::rc::Rc;
 use gtk::prelude::{ContainerExt, GtkWindowExt, WidgetExt};
 use webkit2gtk::{glib, LoadEvent, PermissionRequestExt, SettingsExt, WebView, WebViewExt};
 
+#[path = "../src/linux_canvas.rs"]
+mod linux_canvas;
+
 const TEST: &str = include_str!("webrtc-smoke.js");
 
 fn main() {
@@ -12,6 +15,7 @@ fn main() {
     window.set_default_size(640, 480);
     let view = WebView::new();
     if let Some(settings) = WebViewExt::settings(&view) {
+        linux_canvas::configure(&settings);
         settings.set_enable_webrtc(true);
         settings.set_enable_media_stream(true);
         settings.set_enable_media_capabilities(true);
@@ -26,10 +30,11 @@ fn main() {
     window.show_all();
     window.connect_destroy(|_| gtk::main_quit());
 
+    let canvas_check = std::env::var_os("MSTEAMS_CANVAS_CHECK").is_some();
     let started = Rc::new(Cell::new(false));
     let started_callback = Rc::clone(&started);
     view.connect_load_changed(move |view, event| {
-        if event == LoadEvent::Finished && !started_callback.replace(true) {
+        if !canvas_check && event == LoadEvent::Finished && !started_callback.replace(true) {
             view.evaluate_javascript(TEST, None, None, None::<&gio::Cancellable>, |result| {
                 if let Err(error) = result {
                     eprintln!("JavaScript evaluation failed: {error}");
@@ -54,6 +59,11 @@ fn main() {
     } else {
         "http://localhost/"
     };
-    view.load_html("<title>WebRTC smoke test</title>", Some(origin));
+    let html = if canvas_check {
+        include_str!("../../tests/canvas-check.html")
+    } else {
+        "<title>WebRTC smoke test</title>"
+    };
+    view.load_html(html, Some(origin));
     gtk::main();
 }

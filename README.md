@@ -8,6 +8,66 @@ hands external links off to your browser — without bundling the official
 
 > Unofficial project. Not affiliated with, endorsed by or supported by Microsoft.
 
+## Linux: native app without compiling WebRTC
+
+Use the Teams AppImage from the project's GitHub releases. It bundles the
+custom WebRTC-enabled WebKitGTK; do not install a separate `libwebrtc.so`.
+To run the native wrapper from source on Ubuntu 24.04 x86-64, install the
+[build dependencies](#calls--webrtc-on-linux), then run from the repository root
+(with GitHub CLI and Python 3.12+, instead of `build-webrtc-webkit.sh`):
+
+```bash
+tag=$(python3 scripts/webkit-bundle.py identity)
+download=$(mktemp -d)
+gh release download "$tag" --dir "$download" --pattern "$tag.tar.gz*" &&
+  python3 scripts/webkit-bundle.py unpack --archive "$download/$tag.tar.gz" &&
+  ./scripts/build.sh --run --release
+```
+
+The unpacker checks the checksum and runtime profile before installing into
+`.webrtc-webkit/install`. It refuses to overwrite an existing install. If the
+matching bundle is already installed, run just the last command.
+
+### Captured canvas freezes on software-rendered Linux
+
+With the bundled WebKitGTK 2.48 on Ubuntu 24.04 x86-64 / Xvfb, we reproduced
+`WebKitWebProcess` crashing in Skia's `GrResourceCache` while presenting a
+captured canvas. Without a `/dev/dri/renderD*` node, the wrapper now turns off
+**only accelerated 2D canvas**. On a GPU desktop the existing default stays in
+place. Set `MSTEAMS_SOFTWARE_CANVAS=1` to try the workaround on such a machine,
+or `MSTEAMS_SOFTWARE_CANVAS=0` to compare the unchanged WebKit setting.
+
+A short preview-only regression check (no frame recording, account, or camera):
+
+```sh
+MSTEAMS_CANVAS_CHECK=1 ./scripts/build.sh --run --release --example webrtc-smoke
+```
+
+Preview playback passed 3 consecutive runs in Xvfb. This does not prove call
+performance: the separate synthetic WebRTC test connected both peers but did
+not receive RTP in that environment. Do not treat the preview as a call test.
+
+### Optional browser window (not the native wrapper)
+
+With an up-to-date Google Chrome, Microsoft Edge, or Chromium installed on
+`PATH`, start Teams in a standalone browser window:
+
+```sh
+./scripts/teams-browser.sh
+```
+
+This uses the browser's own WebRTC, codecs and rendering pipeline. No Rust,
+WebKitGTK, AppImage or frame recording is needed. Use Chrome or Edge first:
+codec availability in distro Chromium packages can vary. Sign in with the
+browser profile and allow the Teams site to use your microphone and camera.
+Check the preview and audio device selection before joining a meeting.
+
+This is an alternative to the Tauri wrapper, not a patch to the AppImage.
+The wrapper's tray badge, link handling and sign-in storage are not used.
+If calls stutter, check Teams **Call health** during a call for received frame
+rate and packet loss. This does not record frames. Compare the same meeting
+and devices before attributing a slowdown to the rendering engine.
+
 ## Features
 
 - **Native window** that loads `https://teams.microsoft.com`.

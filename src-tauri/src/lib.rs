@@ -18,6 +18,8 @@
 #[cfg(target_os = "linux")]
 mod external;
 mod link_policy;
+#[cfg(target_os = "linux")]
+mod linux_canvas;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -274,6 +276,7 @@ fn configure_webkit<R: Runtime>(window: &WebviewWindow<R>, url: Url) {
         }
 
         if let Some(settings) = view.settings() {
+            linux_canvas::configure(&settings);
             settings.set_enable_webrtc(true);
             settings.set_enable_media_stream(true);
             settings.set_enable_media_capabilities(true);
